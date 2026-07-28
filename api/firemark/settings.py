@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator, model_validator
 
 Environment = Literal["local", "test", "staging", "production"]
 
@@ -19,6 +20,8 @@ class Settings(BaseModel):
     base_url: str | None = None
     signing_key: SecretStr | None = None
     public_key: str | None = None
+    signing_key_file: Path | None = None
+    public_key_file: Path | None = None
     signer_key_id: str | None = None
     b2_key_id: SecretStr | None = None
     b2_app_key: SecretStr | None = None
@@ -42,12 +45,31 @@ class Settings(BaseModel):
             raise ValueError(f"FIREMARK_ENV must be one of: {choices}")
         return value
 
+    @model_validator(mode="after")
+    def reject_conflicting_key_sources(self) -> Settings:
+        """Reject ambiguous direct and file-based key configuration."""
+        if self.signing_key is not None and self.signing_key_file is not None:
+            raise ValueError("Configure only one private signing key source")
+        if self.public_key is not None and self.public_key_file is not None:
+            raise ValueError("Configure only one public signing key source")
+        return self
+
+    def require_private_key_source(self) -> SecretStr | Path:
+        """Return the sole private key source or fail for production startup."""
+        if self.signing_key is not None:
+            return self.signing_key
+        if self.signing_key_file is not None:
+            return self.signing_key_file
+        raise ValueError("Exactly one private signing key source is required")
+
 
 _ENVIRONMENT_FIELDS = {
     "FIREMARK_ENV": "environment",
     "FIREMARK_BASE_URL": "base_url",
     "FIREMARK_SIGNING_KEY": "signing_key",
     "FIREMARK_PUBLIC_KEY": "public_key",
+    "FIREMARK_SIGNING_KEY_FILE": "signing_key_file",
+    "FIREMARK_PUBLIC_KEY_FILE": "public_key_file",
     "FIREMARK_SIGNER_KEY_ID": "signer_key_id",
     "B2_KEY_ID": "b2_key_id",
     "B2_APP_KEY": "b2_app_key",
@@ -68,6 +90,6 @@ def load_settings() -> Settings:
     values = {
         field_name: value
         for environment_name, field_name in _ENVIRONMENT_FIELDS.items()
-        if (value := os.getenv(environment_name)) is not None
+        if (value := os.getenv(environment_name)) not in (None, "")
     }
     return Settings.model_validate(values)

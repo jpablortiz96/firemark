@@ -47,4 +47,4 @@ strict = true
 warn_unreachable = true
 pretty = true
 show_error_codes = true
-files = ["api"]
+files = ["api", "scripts"]

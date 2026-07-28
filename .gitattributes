@@ -1,0 +1,43 @@
+# Normalize repository text files to LF.
+* text=auto eol=lf
+
+# Keep source, configuration, manifests, documentation, and scripts as text.
+*.json text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.sql text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+
+# Generated media and binary artifacts.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.mp4 binary
+*.mov binary
+*.webm binary
+*.mp3 binary
+*.wav binary
+*.flac binary
+*.aac binary
+*.m4a binary
+*.pdf binary
+*.zip binary
+*.parquet binary
+
+# Other common binary assets.
+*.avif binary
+*.bmp binary
+*.ico binary
+*.tif binary
+*.tiff binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.bin binary

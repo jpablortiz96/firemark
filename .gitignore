@@ -24,6 +24,7 @@ dist/
 !.env.example
 *.local
 secrets/
+.secrets/
 *.secret
 *.secrets
 
@@ -38,6 +39,7 @@ temp/
 
 # Raw evidence outputs
 evidence/*
+!evidence/pubkey.txt
 !evidence/results/
 evidence/results/*
 !evidence/results/.gitkeep
