@@ -1,0 +1,1 @@
+"""Core FIREMARK application package."""
