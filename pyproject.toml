@@ -21,7 +21,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "genblaze-cli==0.3.6",
   "mypy",
+  "Pillow",
   "pytest",
   "pytest-cov",
   "ruff",

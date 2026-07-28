@@ -29,6 +29,7 @@ secrets/
 *.secrets
 
 # Generated media and temporary uploads
+.artifacts/
 generated/
 generated-media/
 media/generated/
