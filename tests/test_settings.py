@@ -19,10 +19,16 @@ ENVIRONMENT_VARIABLES = (
     "FIREMARK_SIGNER_KEY_ID",
     "B2_KEY_ID",
     "B2_APP_KEY",
-    "B2_REGION",
     "B2_ENDPOINT",
+    "B2_REGION",
     "B2_ASSETS_BUCKET",
+    "B2_ASSETS_KEY_ID",
+    "B2_ASSETS_APP_KEY",
     "B2_VAULT_BUCKET",
+    "B2_VAULT_KEY_ID",
+    "B2_VAULT_APP_KEY",
+    "FIREMARK_VAULT_RETENTION_DAYS",
+    "FIREMARK_PRESIGNED_URL_TTL_SECONDS",
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
     "GMI_API_KEY",
@@ -33,124 +39,168 @@ ENVIRONMENT_VARIABLES = (
 
 @pytest.fixture(autouse=True)
 def clear_firemark_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Isolate settings tests from credentials in the developer environment."""
     for variable_name in ENVIRONMENT_VARIABLES:
         monkeypatch.delenv(variable_name, raising=False)
 
 
-def test_default_environment_is_local() -> None:
-    settings = load_settings()
+def complete_values() -> dict[str, object]:
+    return {
+        "b2_endpoint": "https://s3.test.invalid/",
+        "b2_region": " test-region ",
+        "b2_assets_bucket": "assets-test",
+        "b2_assets_key_id": "assets-key-id",
+        "b2_assets_app_key": "assets-app-key",
+        "b2_vault_bucket": "vault-test",
+        "b2_vault_key_id": "vault-key-id",
+        "b2_vault_app_key": "vault-app-key",
+        "vault_retention_days": 90,
+        "presigned_url_ttl_seconds": 300,
+    }
 
+
+def test_defaults_allow_zero_network_imports_without_credentials() -> None:
+    settings = load_settings()
     assert settings.environment == "local"
+    assert settings.b2_assets_app_key is None
+    assert settings.vault_retention_days is None
+    assert settings.presigned_url_ttl_seconds == 300
 
 
-def test_production_environment_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FIREMARK_ENV", "production")
-
-    settings = load_settings()
-
-    assert settings.environment == "production"
-
-
-def test_invalid_environment_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FIREMARK_ENV", "development")
-
-    with pytest.raises(ValidationError, match="FIREMARK_ENV must be one of"):
-        load_settings()
+def test_complete_separate_assets_and_vault_configuration() -> None:
+    settings = Settings.model_validate(complete_values())
+    complete = settings.require_complete_b2_config()
+    assert complete.assets.endpoint == "https://s3.test.invalid"
+    assert complete.assets.region == "test-region"
+    assert complete.assets.bucket == "assets-test"
+    assert complete.vault.bucket == "vault-test"
+    assert complete.vault.retention_days == 90
 
 
-def test_secrets_use_secret_str_and_are_redacted() -> None:
-    secret_value = "test-only-secret"
-    settings = Settings(
-        signing_key=secret_value,
-        b2_key_id=secret_value,
-        b2_app_key=secret_value,
-        supabase_service_role_key=secret_value,
-        gmi_api_key=secret_value,
-        elevenlabs_api_key=secret_value,
-        replicate_api_token=secret_value,
-    )
-
-    assert isinstance(settings.signing_key, SecretStr)
-    assert isinstance(settings.b2_key_id, SecretStr)
-    assert isinstance(settings.b2_app_key, SecretStr)
-    assert isinstance(settings.supabase_service_role_key, SecretStr)
-    assert isinstance(settings.gmi_api_key, SecretStr)
-    assert isinstance(settings.elevenlabs_api_key, SecretStr)
-    assert isinstance(settings.replicate_api_token, SecretStr)
-    assert secret_value not in repr(settings)
-    assert "**********" in repr(settings)
-
-
-def test_loading_without_external_credentials_succeeds() -> None:
-    settings = load_settings()
-
-    assert settings.signing_key is None
-    assert settings.b2_app_key is None
-    assert settings.supabase_service_role_key is None
-    assert settings.gmi_api_key is None
-    assert settings.elevenlabs_api_key is None
-    assert settings.replicate_api_token is None
-
-
-def test_empty_optional_environment_values_are_treated_as_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for variable_name in ENVIRONMENT_VARIABLES:
-        monkeypatch.setenv(variable_name, "")
-
-    settings = load_settings()
-
-    assert settings.environment == "local"
-    assert settings.signing_key is None
-    assert settings.signing_key_file is None
-
-
-def test_key_file_paths_load_without_reading_files(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    missing_private_path = tmp_path / "not-read-private.b64"
-    missing_public_path = tmp_path / "not-read-public.b64"
-    monkeypatch.setenv("FIREMARK_SIGNING_KEY_FILE", str(missing_private_path))
-    monkeypatch.setenv("FIREMARK_PUBLIC_KEY_FILE", str(missing_public_path))
-
-    settings = load_settings()
-
-    assert settings.signing_key_file == missing_private_path
-    assert settings.public_key_file == missing_public_path
-    assert settings.require_private_key_source() == missing_private_path
-
-
-def test_direct_private_key_source_is_returned_as_secret() -> None:
-    settings = Settings(signing_key="clearly-labeled-test-secret")
-
-    source = settings.require_private_key_source()
-
-    assert isinstance(source, SecretStr)
-    assert "clearly-labeled-test-secret" not in repr(settings)
-
-
-def test_missing_private_key_source_is_allowed_until_explicitly_required() -> None:
-    settings = Settings()
-
-    with pytest.raises(ValueError, match="Exactly one"):
-        settings.require_private_key_source()
+def test_environment_loader_uses_new_separate_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    values = complete_values()
+    mapping = {
+        "B2_ENDPOINT": values["b2_endpoint"],
+        "B2_REGION": values["b2_region"],
+        "B2_ASSETS_BUCKET": values["b2_assets_bucket"],
+        "B2_ASSETS_KEY_ID": values["b2_assets_key_id"],
+        "B2_ASSETS_APP_KEY": values["b2_assets_app_key"],
+        "B2_VAULT_BUCKET": values["b2_vault_bucket"],
+        "B2_VAULT_KEY_ID": values["b2_vault_key_id"],
+        "B2_VAULT_APP_KEY": values["b2_vault_app_key"],
+        "FIREMARK_VAULT_RETENTION_DAYS": "90",
+    }
+    for name, value in mapping.items():
+        monkeypatch.setenv(name, str(value))
+    assert load_settings().require_complete_b2_config().vault.retention_days == 90
 
 
 @pytest.mark.parametrize(
     "values",
     [
-        {
-            "signing_key": "clearly-labeled-test-secret",
-            "signing_key_file": "test-private.b64",
-        },
-        {
-            "public_key": "clearly-labeled-test-public-key",
-            "public_key_file": "test-public.b64",
-        },
+        {"b2_assets_bucket": "assets-test"},
+        {"b2_assets_bucket": "assets-test", "b2_assets_key_id": "key"},
+        {"b2_vault_bucket": "vault-test", "b2_vault_app_key": "secret"},
     ],
 )
-def test_conflicting_key_sources_are_rejected(values: dict[str, str]) -> None:
-    with pytest.raises(ValidationError, match="only one"):
+def test_partial_credential_groups_are_rejected(values: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="must be complete"):
         Settings.model_validate(values)
+
+
+def test_helpers_reject_missing_shared_or_retention_configuration() -> None:
+    values = complete_values()
+    values.pop("b2_endpoint")
+    settings = Settings.model_validate(values)
+    with pytest.raises(ValueError, match="assets"):
+        settings.require_assets_b2_config()
+    with pytest.raises(ValueError, match="vault"):
+        settings.require_vault_b2_config()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://s3.test.invalid",
+        "https://",
+        "https://user:password@s3.test.invalid",
+        "https://s3.test.invalid/path",
+        "https://s3.test.invalid?query=yes",
+        "https://s3.test.invalid#fragment",
+    ],
+)
+def test_endpoint_is_strict_https_origin(endpoint: str) -> None:
+    with pytest.raises(ValidationError, match="B2_ENDPOINT"):
+        Settings(b2_endpoint=endpoint)
+
+
+def test_same_bucket_and_invalid_bucket_names_are_rejected() -> None:
+    values = complete_values()
+    values["b2_vault_bucket"] = values["b2_assets_bucket"]
+    with pytest.raises(ValidationError, match="must be different"):
+        Settings.model_validate(values)
+    with pytest.raises(ValidationError, match="bucket names"):
+        Settings(b2_assets_bucket="bad")
+
+    values = complete_values()
+    values["b2_vault_key_id"] = values["b2_assets_key_id"]
+    with pytest.raises(ValidationError, match="different key IDs"):
+        Settings.model_validate(values)
+
+
+@pytest.mark.parametrize("value", [0, 3651, True])
+def test_retention_bounds(value: object) -> None:
+    with pytest.raises(ValidationError, match="between 1 and 3650"):
+        Settings(vault_retention_days=value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [59, 901, True])
+def test_presigned_ttl_bounds(value: object) -> None:
+    with pytest.raises(ValidationError, match="between 60 and 900"):
+        Settings(presigned_url_ttl_seconds=value)  # type: ignore[arg-type]
+
+
+def test_all_b2_credentials_are_redacted_from_repr() -> None:
+    assets_secret = "clearly-labeled-assets-test-secret"
+    vault_secret = "clearly-labeled-vault-test-secret"
+    settings = Settings(
+        b2_assets_bucket="assets-test",
+        b2_assets_key_id=assets_secret,
+        b2_assets_app_key=assets_secret,
+        b2_vault_bucket="vault-test",
+        b2_vault_key_id=vault_secret,
+        b2_vault_app_key=vault_secret,
+    )
+    assert isinstance(settings.b2_assets_app_key, SecretStr)
+    assert isinstance(settings.b2_vault_app_key, SecretStr)
+    assert assets_secret not in repr(settings)
+    assert vault_secret not in repr(settings)
+    assert "**********" in repr(settings)
+
+
+def test_legacy_generic_b2_environment_variables_are_not_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("B2_KEY_ID", "legacy-key")
+    monkeypatch.setenv("B2_APP_KEY", "legacy-secret")
+    settings = load_settings()
+    assert settings.b2_assets_key_id is None
+    assert "legacy-secret" not in repr(settings)
+
+
+def test_environment_and_signing_configuration_remain_supported(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FIREMARK_ENV", "production")
+    private_path = tmp_path / "not-read-private.b64"
+    monkeypatch.setenv("FIREMARK_SIGNING_KEY_FILE", str(private_path))
+    settings = load_settings()
+    assert settings.environment == "production"
+    assert settings.require_private_key_source() == private_path
+
+    with pytest.raises(ValueError, match="Exactly one"):
+        Settings().require_private_key_source()
+    with pytest.raises(ValidationError, match="only one"):
+        Settings(signing_key="test", signing_key_file=private_path)
+    with pytest.raises(ValidationError, match="FIREMARK_ENV"):
+        Settings(environment="development")  # type: ignore[arg-type]

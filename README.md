@@ -50,11 +50,11 @@ with `sealed_sha256`.
 
 ## Repository status
 
-The repository now contains the local Trust Kernel milestone: streaming SHA-256 hashing, raw
-Ed25519 key handling, canonical Seal Envelope serialization, detached signing and verification,
-and zero-network local smoke tests. It also contains a Genblaze Local Provenance Roundtrip tested
-against `genblaze-core==0.3.8` and `genblaze-cli==0.3.6`. This is a cryptographic and SDK contract
-foundation, not a complete production system.
+The repository contains the local Trust Kernel, the Genblaze Local Provenance Roundtrip, and the B2
+Custody Kernel. The custody layer provides content-addressed private storage, independent byte
+verification, explicit COMPLIANCE Object Lock readback, and corroborated delete-denial evidence.
+Ordinary tests are zero-network; real Backblaze evidence exists only after an explicit successful
+live run. This remains a trust and custody foundation, not a complete production system.
 
 ## Genblaze local provenance roundtrip
 
@@ -77,7 +77,58 @@ Manifest because removing prompt, parameters, or seed would invalidate its canon
 installed `EmbedPolicy` therefore requires pointer mode, which emits only `schema_version`,
 `canonical_hash`, and a local fixture `manifest_uri`. In 0.3.8, `SmartEmbedder` stores that pointer
 as a `.genblaze.json` sidecar and leaves the corresponding public PNG bytes unchanged. Durable
-pointer resolution is deferred until the storage milestone.
+pointer resolution is provided by the B2 Custody Kernel, while public capsule publication remains
+deferred.
+
+## B2 Custody Kernel
+
+FIREMARK uses two separately credentialed private buckets:
+
+- The assets bucket contains normal source objects and full private manifests. These objects can be
+  downloaded through short-lived presigned GET URLs and cleaned up deliberately.
+- The vault bucket contains the same source evidence and full manifests under COMPLIANCE Object
+  Lock. Vault objects are never sent through generic cleanup paths.
+
+The deterministic key layout is:
+
+```text
+assets/{sha256[0:2]}/{sha256[2:4]}/{sha256}.{extension}
+manifests/{run_id}/{canonical_hash}.json
+public/{cert_id}/pointer.json
+public/{cert_id}/signed-envelope.json
+public/{cert_id}/custody-receipt.json
+vault/sources/{sha256[0:2]}/{sha256[2:4]}/{sha256}.{extension}
+vault/manifests/{run_id}/{canonical_hash}.json
+```
+
+The Genblaze `canonical_hash` identifies the canonical manifest contract. FIREMARK separately
+hashes the complete serialized manifest bytes for storage integrity; these digests have different
+coverage and must not be conflated.
+
+Object Lock enabled on a bucket only means the bucket can accept retention parameters. FIREMARK
+claims active custody only after reading both object retentions back from B2, confirming
+`COMPLIANCE`, confirming a sufficient retain-until date, and re-downloading the exact bytes.
+COMPLIANCE retention cannot be shortened or bypassed by FIREMARK. A retained smoke object remains
+stored and billable until its retention expires.
+
+Assets and vault application keys must be different and scoped to their respective private
+buckets. The vault key must be able to write retained versions, read retention, head and download
+objects, and attempt normal deletion without a governance-bypass capability. The assets key needs
+normal private read, write, head, and delete capabilities. Never make either bucket public.
+
+### Accepted Genblaze version matrix
+
+The authorized matrix is `genblaze-core==0.3.8`, `genblaze-cli==0.3.6`, and
+`genblaze-s3==0.3.6`. Adapter metadata declares `genblaze-core>=0.3.4,<0.4`; public protocol tests
+pin this relationship. The upstream adapter internally imports `genblaze_core._version`. FIREMARK
+accepts that upstream implementation risk only with exact pins and contract tests, and FIREMARK
+source never imports underscore-prefixed Genblaze modules itself.
+
+FIREMARK uses public `S3StorageBackend` and `ObjectStorageSink` integration for normal Genblaze
+pipeline compatibility. Direct boto3 calls implement custody controls because genblaze-s3 0.3.6
+does not expose sufficient retention inspection, exact VersionId proof, or corroborated delete
+denial. FIREMARK also uses boto3 presigning because genblaze-s3 `presigned_get()` performs a remote
+preflight even when constructed with `preflight=False`.
 
 ## Local setup
 
@@ -94,11 +145,31 @@ python -m ruff check .
 python -m mypy api scripts
 python scripts\smoke_trust.py
 python scripts\smoke_genblaze_roundtrip.py
+python scripts\smoke_b2_custody.py --help
+python scripts\smoke_b2_custody.py
 ```
 
-The `.env` file is optional for the current tests. If used, populate it locally and never commit it.
+The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
 The settings loader reads process environment variables explicitly; it does not automatically load
-the `.env` file.
+the `.env` file. Only the explicitly live B2 smoke command loads the ignored repository `.env`.
+
+Configure two private buckets locally by copying `.env.example` to `.env`. The vault bucket must
+have Object Lock enabled when it is created. Use one-day retention only for a deliberate
+development smoke run; the current production target is 90 days and must be selected explicitly.
+
+Run real B2 verification only after reviewing costs and capabilities:
+
+```powershell
+python scripts\smoke_b2_custody.py --live `
+  --output-report .artifacts\b2-custody-report.json `
+  --force
+python -m pytest -m live_b2 --run-live-b2
+```
+
+The smoke uses a deterministic local PNG, not AI-generated or provider-generated content. It
+creates two persistent COMPLIANCE-retained vault versions and intentionally leaves them in place.
+The report contains safe keys, hashes, versions, and retention timestamps, but never credentials or
+the presigned URL. The default command without `--live` exits with code 2 and makes no network call.
 
 ## Security
 
@@ -158,8 +229,8 @@ or verify a complete Manifest without resolving `manifest_uri`.
 
 ## Honest limitations
 
-No external provider or cloud integration is present. The local fixture proves supported Genblaze
-PNG SDK behavior, but it does not prove provider generation or durable custody. Backblaze B2,
-Object Lock, API endpoints, database persistence, Supabase, provider generation, public certificate
-publication, the delivery verification gate, and the frontend remain unimplemented. Local
-embedding and envelope signing do not make these absent components production-ready.
+The B2 Custody Kernel does not prove provider generation; its smoke content is a local fixture.
+Supabase, FastAPI endpoints, the frontend, real provider pipelines, public certificate publication,
+the delivery verification gate, and the public inline capsule remain unimplemented. The B2 live
+proof is environment-specific, creates non-atomic state across four objects, and cannot make the
+complete application production-ready.

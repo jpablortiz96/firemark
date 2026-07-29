@@ -13,16 +13,21 @@ authors = [
   { name = "Juan Pablo Enriquez Ortiz" },
 ]
 dependencies = [
+  "boto3==1.43.58",
+  "botocore==1.43.58",
   "genblaze-core==0.3.8",
+  "genblaze-s3==0.3.6",
   "cryptography",
   "pydantic",
   "python-dotenv",
+  "urllib3>=2,<3",
 ]
 
 [project.optional-dependencies]
 dev = [
   "genblaze-cli==0.3.6",
   "mypy",
+  "packaging",
   "Pillow",
   "pytest",
   "pytest-cov",
@@ -35,6 +40,9 @@ include = ["api", "api.*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-config --strict-markers"
+markers = [
+  "live_b2: contacts only an explicitly configured Backblaze B2 endpoint",
+]
 
 [tool.ruff]
 target-version = "py312"
@@ -46,6 +54,7 @@ select = ["B", "E4", "E7", "E9", "F", "I", "UP"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+explicit_package_bases = true
 warn_unreachable = true
 pretty = true
 show_error_codes = true
