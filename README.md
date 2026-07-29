@@ -184,6 +184,20 @@ uses `head_bucket`, `list_objects_v2` with `MaxKeys=1`, and the vault Object Loc
 read. It never prints object names or credentials and never uploads, deletes, presigns, changes
 retention, writes a report, or repeats the custody smoke.
 
+After read-only access passes, inspect objects persisted by an interrupted custody smoke without
+repeating or mutating the smoke workflow. The default command exits with informational code 2 and
+makes no network call; the explicitly live command lists current FIREMARK keys, streams at most 10
+MiB per object for in-memory integrity checks, and reads vault retention without changing it:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\inspect_b2_smoke_state.py
+D:\firemark\.venv\Scripts\python.exe scripts\inspect_b2_smoke_state.py --live
+```
+
+The inspector prints only allowlisted metadata and normalized safe errors. It never prints object
+bodies or complete manifests, persists downloaded bytes, uploads, deletes, copies, presigns, or
+changes bucket or Object Lock settings.
+
 ## Security
 
 Credentials, private signing keys, raw evidence, generated media, and local databases must remain
