@@ -76,6 +76,14 @@ class B2RetentionError(B2Error):
 class B2DeleteProofError(B2Error):
     """Raised when a failed delete cannot be attributed safely to active retention."""
 
+    def __init__(self, message: str, *, service_error_code: str | None = None) -> None:
+        super().__init__(message)
+        self.service_error_code = service_error_code
+
+
+class B2CleanupError(B2Error):
+    """Raised when an exact unlocked object version cannot be proven absent."""
+
 
 class S3Client(Protocol):
     """Small structural surface used from the dynamic boto3 S3 client."""
@@ -95,6 +103,38 @@ class S3Client(Protocol):
     def get_object_retention(self, **kwargs: Any) -> dict[str, Any]: ...
 
     def get_object_lock_configuration(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def list_object_versions(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class HeadObjectClient(Protocol):
+    """Client surface for one exact object metadata read."""
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class PresignClient(Protocol):
+    """Client surface for local presigned GET generation."""
+
+    def generate_presigned_url(self, *args: Any, **kwargs: Any) -> str: ...
+
+
+class RetentionReadClient(Protocol):
+    """Client surface for exact-version retention readback."""
+
+    def get_object_retention(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class ExactCleanupClient(HeadObjectClient, Protocol):
+    """Client surface for exact-version unlocked cleanup and verification."""
+
+    def delete_object(self, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class LockedProofClient(HeadObjectClient, RetentionReadClient, Protocol):
+    """Client surface for an exact-version retained delete challenge."""
+
+    def delete_object(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
 ClientFactory = Callable[..., S3Client]
@@ -279,6 +319,12 @@ def _version_parameters(version_id: str | None) -> dict[str, str]:
     return {"VersionId": version_id} if version_id else {}
 
 
+def _required_version_id(version_id: str | None) -> str:
+    if not isinstance(version_id, str) or not version_id.strip():
+        raise B2ConfigurationError("An exact nonblank VersionId is required")
+    return version_id
+
+
 def _response_datetime(value: object, label: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise B2OperationError(f"B2 returned an invalid {label} timestamp")
@@ -300,7 +346,7 @@ def check_bucket_access(client: S3Client, *, bucket: str) -> None:
 
 
 def head_object_receipt(
-    client: S3Client,
+    client: HeadObjectClient,
     *,
     bucket: str,
     key: str,
@@ -586,7 +632,7 @@ def _validate_ttl(ttl_seconds: int) -> int:
 
 
 def generate_presigned_get(
-    client: S3Client,
+    client: PresignClient,
     *,
     bucket: str,
     key: str,
@@ -609,24 +655,67 @@ def generate_presigned_get(
 
 
 def delete_unlocked_object(
-    client: S3Client,
+    client: ExactCleanupClient,
     *,
     bucket: str,
     key: str,
     version_id: str | None = None,
     known_unlocked: bool = False,
 ) -> None:
-    """Delete only an object explicitly known to be outside immutable custody."""
+    """Delete one exact object version known to be outside immutable custody."""
     if not known_unlocked:
         raise B2ConfigurationError("Refusing cleanup when object retention state is unknown")
+    exact_version = _required_version_id(version_id)
     try:
         client.delete_object(
             Bucket=bucket,
             Key=key,
-            **_version_parameters(version_id),
+            VersionId=exact_version,
         )
     except (BotoCoreError, ClientError) as exc:
         raise B2OperationError(_safe_operation_error("delete_object", bucket, key)) from exc
+
+
+def delete_unlocked_version_verified(
+    client: ExactCleanupClient,
+    *,
+    bucket: str,
+    key: str,
+    version_id: str | None,
+    expected_sha256: str,
+    known_unlocked: bool = False,
+) -> bool:
+    """Delete and prove absence of one exact unlocked version; missing is idempotent."""
+    if not known_unlocked:
+        raise B2ConfigurationError("Refusing cleanup when object retention state is unknown")
+    exact_version = _required_version_id(version_id)
+    digest = _validate_digest(expected_sha256)
+    before = head_object_receipt(
+        client,
+        bucket=bucket,
+        key=key,
+        expected_sha256=digest,
+        version_id=exact_version,
+    )
+    if before is None:
+        return False
+    try:
+        client.delete_object(Bucket=bucket, Key=key, VersionId=exact_version)
+    except ClientError as exc:
+        if _service_code(exc) not in {"404", "NoSuchKey", "NoSuchVersion", "NotFound"}:
+            raise B2CleanupError(_safe_operation_error("delete_object", bucket, key)) from exc
+    except BotoCoreError as exc:
+        raise B2CleanupError(_safe_operation_error("delete_object", bucket, key)) from exc
+    after = head_object_receipt(
+        client,
+        bucket=bucket,
+        key=key,
+        expected_sha256=digest,
+        version_id=exact_version,
+    )
+    if after is not None:
+        raise B2CleanupError("Exact unlocked object version still exists after cleanup")
+    return True
 
 
 def verify_bucket_object_lock_enabled(client: S3Client, *, bucket: str) -> None:
@@ -650,7 +739,7 @@ def _future_retention(retention_until: datetime, *, now: datetime | None = None)
 
 
 def read_object_retention(
-    client: S3Client,
+    client: RetentionReadClient,
     *,
     bucket: str,
     key: str,
@@ -815,35 +904,39 @@ def upload_locked_file(
 
 
 def prove_locked_delete_denial(
-    client: S3Client,
+    client: LockedProofClient,
     receipt: LockedObjectReceipt,
     *,
     now: datetime | None = None,
 ) -> LockedDeleteProof:
-    """Prove a delete denial only through active retention and post-error corroboration."""
+    """Challenge one retained version and corroborate the exact same version afterward."""
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
-    before = read_object_retention(
-        client,
-        bucket=receipt.bucket,
-        key=receipt.key,
-        version_id=receipt.version_id,
-    )
-    if before.retain_until <= current_time:
-        raise B2DeleteProofError("Object retention is not currently active")
-    if head_object_receipt(
+    exact_version = _required_version_id(receipt.version_id)
+    before_head = head_object_receipt(
         client,
         bucket=receipt.bucket,
         key=receipt.key,
         expected_sha256=receipt.sha256,
-        version_id=receipt.version_id,
-    ) is None:
+        version_id=exact_version,
+    )
+    if before_head is None:
         raise B2DeleteProofError("Locked object does not exist before delete proof")
+    if before_head.version_id != exact_version:
+        raise B2DeleteProofError("Pre-delete head did not confirm the exact retained version")
+    before = read_object_retention(
+        client,
+        bucket=receipt.bucket,
+        key=receipt.key,
+        version_id=exact_version,
+    )
+    if before.retain_until <= current_time:
+        raise B2DeleteProofError("Object retention is not currently active")
 
     try:
         client.delete_object(
             Bucket=receipt.bucket,
             Key=receipt.key,
-            **_version_parameters(receipt.version_id),
+            VersionId=exact_version,
         )
     except ClientError as exc:
         error_code = _service_code(exc)
@@ -864,29 +957,34 @@ def prove_locked_delete_denial(
     }
     accepted_codes = {"AccessDenied", "InvalidRequest", "MethodNotAllowed", "ObjectLocked"}
     if error_code in rejected_codes or error_code not in accepted_codes:
-        raise B2DeleteProofError(f"Delete denial category is not retention-compatible: {error_code}")
+        raise B2DeleteProofError(
+            "Delete denial category is not retention-compatible",
+            service_error_code=error_code,
+        )
 
     after_head = head_object_receipt(
         client,
         bucket=receipt.bucket,
         key=receipt.key,
         expected_sha256=receipt.sha256,
-        version_id=receipt.version_id,
+        version_id=exact_version,
     )
     if after_head is None:
         raise B2DeleteProofError("Object is missing after the denied delete attempt")
+    if after_head.version_id != exact_version:
+        raise B2DeleteProofError("Post-delete head did not confirm the exact retained version")
     after = read_object_retention(
         client,
         bucket=receipt.bucket,
         key=receipt.key,
-        version_id=receipt.version_id,
+        version_id=exact_version,
     )
     if after.retain_until <= current_time:
         raise B2DeleteProofError("Active retention is absent after the delete attempt")
     return LockedDeleteProof(
         bucket=receipt.bucket,
         key=receipt.key,
-        version_id=receipt.version_id,
+        version_id=exact_version,
         error_code=error_code,
         safe_error_category="active_compliance_retention",
         retention_mode="COMPLIANCE",

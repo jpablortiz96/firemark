@@ -138,12 +138,17 @@ def test_duplicate_locations_and_mismatched_manifest_bytes_are_rejected() -> Non
 
 def test_locked_receipt_and_delete_proof_cannot_be_forged() -> None:
     values = _locked(bucket="vault-test", key="vault/key", digest="a" * 64).model_dump()
+    values["version_id"] = None
+    with pytest.raises(ValidationError, match="VersionId"):
+        LockedObjectReceipt.model_validate(values)
+    values = _locked(bucket="vault-test", key="vault/key", digest="a" * 64).model_dump()
     values["retention_mode"] = "GOVERNANCE"
     with pytest.raises(ValidationError):
         LockedObjectReceipt.model_validate(values)
     values = LockedDeleteProof(
         bucket="vault-test",
         key="vault/key",
+        version_id="version-1",
         error_code="AccessDenied",
         safe_error_category="active_compliance_retention",
         retention_mode="COMPLIANCE",
@@ -261,6 +266,11 @@ def test_partial_workflow_failure_cleans_assets_but_never_vault(tmp_path: Path) 
         )
     assert len(captured.value.partial_keys) == 2
     assert [name for name, _ in assets.calls].count("delete_object") == 2
+    assert all(
+        values.get("VersionId")
+        for name, values in assets.calls
+        if name == "delete_object"
+    )
     assert "delete_object" not in [name for name, _ in vault.calls]
 
 

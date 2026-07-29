@@ -33,7 +33,7 @@ from api.firemark.b2_storage import (
     create_genblaze_assets_backend,
     create_genblaze_assets_sink,
     create_vault_client,
-    delete_unlocked_object,
+    delete_unlocked_version_verified,
     generate_presigned_get,
     prove_locked_delete_denial,
 )
@@ -260,7 +260,6 @@ def _run_live(output_report: Path | None, *, force: bool) -> int:
 
     assets_client = create_assets_client(complete.assets)
     vault_client = create_vault_client(complete.vault)
-    receipt: B2CustodyReceipt | None = None
     try:
         check_bucket_access(assets_client, bucket=complete.assets.bucket)
         check_bucket_access(vault_client, bucket=complete.vault.bucket)
@@ -304,6 +303,16 @@ def _run_live(output_report: Path | None, *, force: bool) -> int:
             )
             proof = prove_locked_delete_denial(vault_client, receipt.vault_manifest)
 
+            for stored in (receipt.assets_source, receipt.assets_manifest):
+                delete_unlocked_version_verified(
+                    assets_client,
+                    bucket=stored.bucket,
+                    key=stored.key,
+                    version_id=stored.version_id,
+                    expected_sha256=stored.sha256,
+                    known_unlocked=True,
+                )
+
         report = _safe_report(
             receipt,
             proof,
@@ -333,19 +342,6 @@ def _run_live(output_report: Path | None, *, force: bool) -> int:
     except (B2Error, LiveSmokeError, ValueError):
         print("FAIL: live custody proof did not complete")
         return 1
-    finally:
-        if receipt is not None:
-            for stored in (receipt.assets_source, receipt.assets_manifest):
-                try:
-                    delete_unlocked_object(
-                        assets_client,
-                        bucket=stored.bucket,
-                        key=stored.key,
-                        version_id=stored.version_id,
-                        known_unlocked=True,
-                    )
-                except B2Error:
-                    print(f"WARNING: normal assets cleanup requires review for key {stored.key}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

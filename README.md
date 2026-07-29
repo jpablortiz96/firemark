@@ -198,6 +198,23 @@ The inspector prints only allowlisted metadata and normalized safe errors. It ne
 bodies or complete manifests, persists downloaded bytes, uploads, deletes, copies, presigns, or
 changes bucket or Object Lock settings.
 
+When that inspector confirms one valid source pair, one valid manifest pair, and active
+`COMPLIANCE` retention, resume only the interrupted post-persistence checkpoint:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\resume_b2_custody_checkpoint.py
+D:\firemark\.venv\Scripts\python.exe scripts\resume_b2_custody_checkpoint.py --live `
+  --output-report .artifacts\b2-custody-resume-report.json `
+  --force
+```
+
+The default recovery command exits with informational code 2 and performs no network call. The
+explicitly live recovery discovers VersionIds, counts relevant delete markers, verifies the
+private presigned source download, challenges the exact retained vault-manifest version, and only
+then deletes and verifies absence of the two exact unlocked assets versions. It never uploads,
+copies, changes retention, removes vault objects or delete markers, or persists the presigned URL.
+The safe report is written only after every mandatory stage passes.
+
 ## Security
 
 Credentials, private signing keys, raw evidence, generated media, and local databases must remain

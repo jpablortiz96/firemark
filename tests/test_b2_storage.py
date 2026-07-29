@@ -11,6 +11,7 @@ import pytest
 from botocore.exceptions import EndpointConnectionError  # type: ignore[import-untyped]
 
 from api.firemark.b2_storage import (
+    B2CleanupError,
     B2ConfigurationError,
     B2DeleteProofError,
     B2IntegrityError,
@@ -25,6 +26,7 @@ from api.firemark.b2_storage import (
     create_genblaze_assets_sink,
     create_vault_client,
     delete_unlocked_object,
+    delete_unlocked_version_verified,
     download_bytes_verified,
     generate_presigned_get,
     head_object_receipt,
@@ -390,14 +392,77 @@ def test_presigned_get_is_bounded_and_redacted(fake_s3: FakeS3Client) -> None:
 def test_delete_requires_known_unlocked_and_sends_no_bypass(fake_s3: FakeS3Client) -> None:
     with pytest.raises(B2ConfigurationError, match="retention state is unknown"):
         delete_unlocked_object(fake_s3, bucket="assets-test", key="object")
+    with pytest.raises(B2ConfigurationError, match="VersionId"):
+        delete_unlocked_object(
+            fake_s3,
+            bucket="assets-test",
+            key="object",
+            known_unlocked=True,
+        )
     fake_s3.delete_error_code = None
     delete_unlocked_object(
         fake_s3,
         bucket="assets-test",
         key="object",
+        version_id="exact-version-1",
         known_unlocked=True,
     )
+    assert fake_s3.calls[-1][1]["VersionId"] == "exact-version-1"
     assert "BypassGovernanceRetention" not in fake_s3.calls[-1][1]
+
+
+def test_exact_unlocked_cleanup_verifies_absence_and_is_idempotent(
+    fake_s3: FakeS3Client,
+) -> None:
+    data = b"exact cleanup"
+    digest = sha256_bytes(data)
+    receipt = upload_bytes_verified(
+        fake_s3,
+        bucket="assets-test",
+        key="assets/exact.bin",
+        data=data,
+        expected_sha256=digest,
+        content_type="application/octet-stream",
+    )
+    with pytest.raises(B2ConfigurationError, match="retention state is unknown"):
+        delete_unlocked_version_verified(
+            fake_s3,
+            bucket=receipt.bucket,
+            key=receipt.key,
+            version_id=receipt.version_id,
+            expected_sha256=receipt.sha256,
+        )
+    with pytest.raises(B2CleanupError, match="delete_object"):
+        delete_unlocked_version_verified(
+            fake_s3,
+            bucket=receipt.bucket,
+            key=receipt.key,
+            version_id=receipt.version_id,
+            expected_sha256=receipt.sha256,
+            known_unlocked=True,
+        )
+    fake_s3.delete_error_code = None
+    assert delete_unlocked_version_verified(
+        fake_s3,
+        bucket=receipt.bucket,
+        key=receipt.key,
+        version_id=receipt.version_id,
+        expected_sha256=receipt.sha256,
+        known_unlocked=True,
+    )
+    delete_call = next(
+        values for name, values in reversed(fake_s3.calls) if name == "delete_object"
+    )
+    assert delete_call["VersionId"] == receipt.version_id
+    assert "BypassGovernanceRetention" not in delete_call
+    assert not delete_unlocked_version_verified(
+        fake_s3,
+        bucket=receipt.bucket,
+        key=receipt.key,
+        version_id=receipt.version_id,
+        expected_sha256=receipt.sha256,
+        known_unlocked=True,
+    )
 
 
 def test_object_lock_disabled_and_past_retention_are_rejected(fake_s3: FakeS3Client) -> None:
@@ -490,6 +555,7 @@ def _locked_receipt(fake_s3: FakeS3Client) -> LockedObjectReceipt:
 
 def test_delete_denial_requires_full_corroboration(fake_s3: FakeS3Client) -> None:
     receipt = _locked_receipt(fake_s3)
+    call_start = len(fake_s3.calls)
     proof = prove_locked_delete_denial(
         fake_s3,
         receipt,
@@ -498,7 +564,29 @@ def test_delete_denial_requires_full_corroboration(fake_s3: FakeS3Client) -> Non
     assert proof.verified is True
     assert proof.error_code == "AccessDenied"
     delete = next(values for name, values in fake_s3.calls if name == "delete_object")
+    assert delete["VersionId"] == receipt.version_id
     assert "BypassGovernanceRetention" not in delete
+    proof_calls = fake_s3.calls[call_start:]
+    assert [name for name, _values in proof_calls] == [
+        "head_object",
+        "get_object_retention",
+        "delete_object",
+        "head_object",
+        "get_object_retention",
+    ]
+    assert all(
+        values["VersionId"] == receipt.version_id for _name, values in proof_calls
+    )
+
+
+def test_delete_proof_rejects_missing_version_before_remote_calls(
+    fake_s3: FakeS3Client,
+) -> None:
+    receipt = _locked_receipt(fake_s3).model_copy(update={"version_id": None})
+    call_count = len(fake_s3.calls)
+    with pytest.raises(B2ConfigurationError, match="VersionId"):
+        prove_locked_delete_denial(fake_s3, receipt, now=datetime(2026, 1, 1, tzinfo=UTC))
+    assert len(fake_s3.calls) == call_count
 
 
 @pytest.mark.parametrize(
@@ -750,7 +838,11 @@ def test_presign_delete_lock_and_retention_service_errors(fake_s3: FakeS3Client)
     fake_s3.raise_for["delete_object"] = service_error("AccessDenied")
     with pytest.raises(B2OperationError, match="delete_object"):
         delete_unlocked_object(
-            fake_s3, bucket="assets-test", key="asset", known_unlocked=True
+            fake_s3,
+            bucket="assets-test",
+            key="asset",
+            version_id="exact-version-1",
+            known_unlocked=True,
         )
     fake_s3.raise_for.clear()
     fake_s3.raise_for["get_object_lock_configuration"] = service_error(

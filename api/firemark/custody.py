@@ -82,6 +82,13 @@ class LockedObjectReceipt(StoredObjectReceipt):
         """Normalize confirmed retention to UTC."""
         return _utc(value)
 
+    @model_validator(mode="after")
+    def require_exact_version(self) -> LockedObjectReceipt:
+        """Require immutable custody evidence to identify one exact version."""
+        if self.version_id is None or not self.version_id.strip():
+            raise ValueError("Locked object receipt requires a nonblank VersionId")
+        return self
+
 
 class LockedDeleteProof(BaseModel):
     """Corroborated safe evidence that active retention denied deletion."""
@@ -90,7 +97,7 @@ class LockedDeleteProof(BaseModel):
 
     bucket: str
     key: str
-    version_id: str | None = None
+    version_id: str
     error_code: str
     safe_error_category: Literal["active_compliance_retention"]
     retention_mode: Literal["COMPLIANCE"]
@@ -209,7 +216,7 @@ def execute_b2_custody(
     from api.firemark.b2_storage import (
         assets_manifest_key,
         assets_source_key,
-        delete_unlocked_object,
+        delete_unlocked_version_verified,
         download_bytes_verified,
         head_object_receipt,
         public_custody_receipt_key,
@@ -236,7 +243,7 @@ def execute_b2_custody(
     manifest_key = assets_manifest_key(run_id, canonical_hash)
     locked_source_key = vault_source_key(source_sha256, extension)
     locked_manifest_key = vault_manifest_key(run_id, canonical_hash)
-    created_assets: list[str] = []
+    created_assets: list[StoredObjectReceipt] = []
     partial_keys: list[str] = []
 
     try:
@@ -257,7 +264,7 @@ def execute_b2_custody(
                 metadata={"firemark-kind": "source", "firemark-schema": "1"},
                 known_unlocked=True,
             )
-            created_assets.append(source_key)
+            created_assets.append(assets_source)
         else:
             if assets_source.content_type != source_content_type:
                 raise B2CustodyWorkflowError("Existing assets source content type conflicts")
@@ -286,7 +293,7 @@ def execute_b2_custody(
                 metadata={"firemark-kind": "manifest", "firemark-schema": "1"},
                 known_unlocked=True,
             )
-            created_assets.append(manifest_key)
+            created_assets.append(assets_manifest)
         else:
             if assets_manifest.content_type != manifest_content_type:
                 raise B2CustodyWorkflowError("Existing assets manifest content type conflicts")
@@ -377,12 +384,14 @@ def execute_b2_custody(
             )
         partial_keys.append(locked_manifest_key)
     except Exception as exc:
-        for key in created_assets:
+        for stored in created_assets:
             try:
-                delete_unlocked_object(
+                delete_unlocked_version_verified(
                     assets_client,
                     bucket=assets_bucket,
-                    key=key,
+                    key=stored.key,
+                    version_id=stored.version_id,
+                    expected_sha256=stored.sha256,
                     known_unlocked=True,
                 )
             except Exception:
