@@ -171,6 +171,19 @@ creates two persistent COMPLIANCE-retained vault versions and intentionally leav
 The report contains safe keys, hashes, versions, and retention timestamps, but never credentials or
 the presigned URL. The default command without `--live` exits with code 2 and makes no network call.
 
+After a failed live smoke, use the separate read-only access diagnostic before authorizing another
+custody attempt. Its default command exits with informational code 2 and performs no network call:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\diagnose_b2_access.py
+D:\firemark\.venv\Scripts\python.exe scripts\diagnose_b2_access.py --live
+```
+
+The live diagnostic is checkpoint-specific and contacts only the configured Backblaze endpoint. It
+uses `head_bucket`, `list_objects_v2` with `MaxKeys=1`, and the vault Object Lock configuration
+read. It never prints object names or credentials and never uploads, deletes, presigns, changes
+retention, writes a report, or repeats the custody smoke.
+
 ## Security
 
 Credentials, private signing keys, raw evidence, generated media, and local databases must remain
