@@ -49,6 +49,15 @@ class CompleteB2Config(BaseModel):
     vault: B2VaultConfig
 
 
+class SupabaseConfig(BaseModel):
+    """Complete server-side Supabase configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    service_role_key: SecretStr
+
+
 class Settings(BaseModel):
     """Typed configuration without import-time credential requirements."""
 
@@ -73,6 +82,8 @@ class Settings(BaseModel):
     presigned_url_ttl_seconds: int = 300
     supabase_url: str | None = None
     supabase_service_role_key: SecretStr | None = None
+    public_base_url: str | None = None
+    delivery_ttl_seconds: int = 300
     gmi_api_key: SecretStr | None = None
     elevenlabs_api_key: SecretStr | None = None
     replicate_api_token: SecretStr | None = None
@@ -102,6 +113,21 @@ class Settings(BaseModel):
             raise ValueError("B2_ENDPOINT must not contain a query string or fragment")
         if parsed.path not in ("", "/"):
             raise ValueError("B2_ENDPOINT must not contain a path")
+        return urlunsplit(("https", parsed.netloc, "", "", ""))
+
+    @field_validator("supabase_url", "public_base_url")
+    @classmethod
+    def validate_external_url(cls, value: str | None) -> str | None:
+        """Require credential-free HTTPS origins for external control-plane URLs."""
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if parsed.scheme.lower() != "https" or not parsed.hostname:
+            raise ValueError("External control-plane URLs must use HTTPS")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("External control-plane URLs must not contain credentials or metadata")
+        if parsed.path not in ("", "/"):
+            raise ValueError("External control-plane URLs must be origins without a path")
         return urlunsplit(("https", parsed.netloc, "", "", ""))
 
     @field_validator("b2_region")
@@ -157,6 +183,22 @@ class Settings(BaseModel):
             raise ValueError("FIREMARK_PRESIGNED_URL_TTL_SECONDS must be between 60 and 900")
         return parsed
 
+    @field_validator("delivery_ttl_seconds", mode="before")
+    @classmethod
+    def validate_delivery_ttl(cls, value: object) -> object:
+        """Bound Verify Gate delivery grants to 60 through 900 seconds."""
+        if isinstance(value, bool):
+            raise ValueError("FIREMARK_DELIVERY_TTL_SECONDS must be between 60 and 900")
+        try:
+            parsed = int(value) if isinstance(value, (int, str)) else -1
+        except ValueError as exc:
+            raise ValueError(
+                "FIREMARK_DELIVERY_TTL_SECONDS must be between 60 and 900"
+            ) from exc
+        if not 60 <= parsed <= 900:
+            raise ValueError("FIREMARK_DELIVERY_TTL_SECONDS must be between 60 and 900")
+        return parsed
+
     @model_validator(mode="after")
     def reject_ambiguous_configuration(self) -> Settings:
         """Reject conflicting key sources and partial B2 credential groups."""
@@ -164,6 +206,8 @@ class Settings(BaseModel):
             raise ValueError("Configure only one private signing key source")
         if self.public_key is not None and self.public_key_file is not None:
             raise ValueError("Configure only one public signing key source")
+        if (self.supabase_url is None) != (self.supabase_service_role_key is None):
+            raise ValueError("Supabase URL and service-role key must be configured together")
 
         assets = (self.b2_assets_bucket, self.b2_assets_key_id, self.b2_assets_app_key)
         vault = (self.b2_vault_bucket, self.b2_vault_key_id, self.b2_vault_app_key)
@@ -253,6 +297,15 @@ class Settings(BaseModel):
             vault=self.require_vault_b2_config(),
         )
 
+    def require_supabase_config(self) -> SupabaseConfig:
+        """Return complete Supabase configuration or fail before client construction."""
+        if self.supabase_url is None or self.supabase_service_role_key is None:
+            raise ValueError("Complete Supabase configuration is required")
+        return SupabaseConfig(
+            url=self.supabase_url,
+            service_role_key=self.supabase_service_role_key,
+        )
+
 
 _ENVIRONMENT_FIELDS = {
     "FIREMARK_ENV": "environment",
@@ -274,6 +327,8 @@ _ENVIRONMENT_FIELDS = {
     "FIREMARK_PRESIGNED_URL_TTL_SECONDS": "presigned_url_ttl_seconds",
     "SUPABASE_URL": "supabase_url",
     "SUPABASE_SERVICE_ROLE_KEY": "supabase_service_role_key",
+    "FIREMARK_PUBLIC_BASE_URL": "public_base_url",
+    "FIREMARK_DELIVERY_TTL_SECONDS": "delivery_ttl_seconds",
     "GMI_API_KEY": "gmi_api_key",
     "ELEVENLABS_API_KEY": "elevenlabs_api_key",
     "REPLICATE_API_TOKEN": "replicate_api_token",

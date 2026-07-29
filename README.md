@@ -50,11 +50,45 @@ with `sealed_sha256`.
 
 ## Repository status
 
-The repository contains the local Trust Kernel, the Genblaze Local Provenance Roundtrip, and the B2
-Custody Kernel. The custody layer provides content-addressed private storage, independent byte
-verification, explicit COMPLIANCE Object Lock readback, and corroborated delete-denial evidence.
-Ordinary tests are zero-network; real Backblaze evidence exists only after an explicit successful
-live run. This remains a trust and custody foundation, not a complete production system.
+The repository contains the local Trust Kernel, the Genblaze Local Provenance Roundtrip, the B2
+Custody Kernel, and the FIREMARK Control Plane. The Control Plane exposes redacted Birth
+Certificates, reconstructs and verifies signed evidence, records append-oriented decisions, and
+requires verification before private delivery. A production-oriented Supabase migration and a
+lazy service-role adapter are included, but no live Supabase project has been created or verified.
+Ordinary tests remain zero-network; external evidence exists only after an explicit successful live
+checkpoint.
+
+## Control Plane
+
+The FastAPI application is built by `api.firemark.app.create_app()`. Construction creates no
+external clients and accepts injected repository and delivery-storage implementations. Local and
+test use can rely on the deterministic in-memory repository. The Supabase adapter is constructed
+explicitly from complete server-side settings and creates its client only on its first operation.
+
+The HTTP surface is intentionally small:
+
+| Method | Path | Contract |
+| --- | --- | --- |
+| `GET` | `/healthz` | Local process health; external dependencies are not contacted. |
+| `GET` | `/v1/certificates/{cert_id}` | Redacted public Birth Certificate. |
+| `POST` | `/v1/verify` | Signature, envelope, custody-reference, status, and optional hash verification. |
+| `POST` | `/v1/delivery/{cert_id}` | Verify Gate requiring the exact `sealed_sha256`. |
+
+The public certificate includes only public identifiers, `sealed_sha256`, `canonical_hash`, signer
+material, the redacted public manifest, status, issuance time, and its verification URL. Prompts,
+parameters, seeds, `source_sha256`, storage locations, VersionIds, and custody receipt internals
+remain on the private service-role path.
+
+The Verify Gate records verification before making a delivery decision. It asks the injected B2
+delivery adapter for an exact-version, short-lived private download only after status, signature,
+envelope, custody references, and presented `sealed_sha256` all pass. The raw URL exists only in the
+successful HTTP serializer; the domain result, event repository, logs, exceptions, and failure
+responses contain no URL.
+
+The migration at `supabase/migrations/20260729000100_firemark_control_plane.sql` creates six RLS
+tables. Anonymous and authenticated roles receive no direct table access. A safe public certificate
+RPC exposes an allowlist, while a service-role-only PostgreSQL RPC atomically and idempotently
+registers the run, asset, custody record, and certificate.
 
 ## Genblaze local provenance roundtrip
 
@@ -148,6 +182,30 @@ python scripts\smoke_genblaze_roundtrip.py
 python scripts\smoke_b2_custody.py --help
 python scripts\smoke_b2_custody.py
 ```
+
+Start the local API with the injected in-memory repository and no external checks:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe -m uvicorn api.firemark.app:create_app `
+  --factory --host 127.0.0.1 --port 8000
+```
+
+OpenAPI is available locally at `http://127.0.0.1:8000/docs`. The default in-memory process starts
+empty; certificate registration is an internal service operation, not a public endpoint.
+
+For a future Supabase checkpoint, create a project manually, review and apply the migration through
+the Supabase CLI, then configure these ignored local values:
+
+```text
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+FIREMARK_PUBLIC_BASE_URL=
+FIREMARK_DELIVERY_TTL_SECONDS=
+```
+
+Do not place the service-role key in a browser, public certificate, log, fixture, or committed file.
+The first live checkpoint must verify RLS, public RPC projection, atomic registration, append-only
+events, and revocation against a disposable non-production project before production use.
 
 The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
 The settings loader reads process environment variables explicitly; it does not automatically load
@@ -273,8 +331,9 @@ or verify a complete Manifest without resolving `manifest_uri`.
 
 ## Honest limitations
 
-The B2 Custody Kernel does not prove provider generation; its smoke content is a local fixture.
-Supabase, FastAPI endpoints, the frontend, real provider pipelines, public certificate publication,
-the delivery verification gate, and the public inline capsule remain unimplemented. The B2 live
-proof is environment-specific, creates non-atomic state across four objects, and cannot make the
-complete application production-ready.
+The B2 Custody Kernel does not prove provider generation; its smoke content is a local fixture. The
+Control Plane migration and Supabase adapter have comprehensive zero-network contract tests but no
+live Supabase evidence yet. Real provider generation, the frontend, authentication/authorization
+policy for delivery callers, public inline capsules, and deployment remain unimplemented. The B2
+live proof is environment-specific, creates non-atomic state across four objects, and cannot make
+the complete application production-ready.

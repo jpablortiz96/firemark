@@ -15,17 +15,21 @@ authors = [
 dependencies = [
   "boto3==1.43.58",
   "botocore==1.43.58",
+  "fastapi==0.139.2",
   "genblaze-core==0.3.8",
   "genblaze-s3==0.3.6",
   "cryptography",
   "pydantic",
   "python-dotenv",
+  "supabase==2.31.0",
   "urllib3>=2,<3",
+  "uvicorn==0.52.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "genblaze-cli==0.3.6",
+  "httpx==0.28.1",
   "mypy",
   "packaging",
   "Pillow",

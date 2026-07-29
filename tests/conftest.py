@@ -11,6 +11,25 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 
+_REAL_SOCKET_CONNECT = socket.socket.connect
+
+
+def _local_socketpair() -> tuple[socket.socket, socket.socket]:
+    """Create only the loopback self-pipe required by Windows asyncio."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        _REAL_SOCKET_CONNECT(client, listener.getsockname())
+        server, _ = listener.accept()
+        return server, client
+    except Exception:
+        client.close()
+        raise
+    finally:
+        listener.close()
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Require an explicit second opt-in before any live B2 test can run."""
@@ -38,7 +57,7 @@ def block_ordinary_network(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fail every ordinary test immediately if it attempts socket or DNS access."""
+    """Fail DNS and external connections while allowing only the asyncio self-pipe."""
     live_enabled = bool(request.config.getoption("--run-live-b2")) and "live_b2" in getattr(
         request.config.option, "markexpr", ""
     )
@@ -50,6 +69,7 @@ def block_ordinary_network(
 
     monkeypatch.setattr(socket, "getaddrinfo", blocked)
     monkeypatch.setattr(socket, "create_connection", blocked)
+    monkeypatch.setattr(socket, "socketpair", _local_socketpair)
     monkeypatch.setattr(socket.socket, "connect", blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
 
