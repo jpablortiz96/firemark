@@ -181,15 +181,47 @@ def test_complete_sequence_hash_order_privacy_signature_and_idempotency() -> Non
         f"sealed/{first.sealed_sha256[:2]}/{first.sealed_sha256[2:4]}/"
     )
     assert certificate.asset.vault_key.startswith("vault/sources/")
-    assert verify_signed_envelope(
-        certificate.signed_envelope, certificate.signer_public_key_b64
-    )
+    assert verify_signed_envelope(certificate.signed_envelope, certificate.signer_public_key_b64)
     assert harness.certificate_service.verify(
         __import__(
             "api.firemark.control_plane.models", fromlist=["VerificationRequest"]
         ).VerificationRequest(cert_id=first.cert_id, presented_sha256=first.sealed_sha256),
         now=NOW,
     ).verified
+
+
+def test_checkpoint_is_prepared_before_first_remote_write_and_updated_afterward() -> None:
+    harness = Harness()
+    events: list[str] = []
+
+    def checkpoint(event: str, values: dict[str, Any]) -> None:
+        if event == "prepared":
+            assert values["source_bytes"] == _TINY_PNG
+            assert PROMPT.encode() in values["manifest_bytes"]
+        events.append(event)
+
+    original_custody = harness.custody
+
+    def custody(**kwargs: Any) -> B2CustodyReceipt:
+        assert events == ["prepared"]
+        events.append("remote_write")
+        return original_custody(**kwargs)
+
+    service = harness.service(
+        checkpoint_callback=checkpoint,
+        custody_executor=custody,
+    )
+    service.generate_and_seal(
+        GenerateAndSealRequest(prompt=PROMPT),
+        idempotency_key=IDEMPOTENCY_KEY,
+    )
+    assert events == [
+        "prepared",
+        "remote_write",
+        "custody_persisted",
+        "sealed_persisted",
+        "registered",
+    ]
 
 
 def test_conflicting_idempotency_key_is_rejected_before_another_generation() -> None:
@@ -275,9 +307,7 @@ def test_unverified_or_versionless_custody_and_sealed_upload_fail_closed() -> No
 
 def test_missing_private_signer_and_registration_failure_are_safe_and_retryable() -> None:
     harness = Harness()
-    public_signer = Ed25519Signer.from_public_key_base64(
-        harness.signer.export_public_key_base64()
-    )
+    public_signer = Ed25519Signer.from_public_key_base64(harness.signer.export_public_key_base64())
     with pytest.raises(GenerateAndSealError, match="SIGNING_KEY_UNAVAILABLE"):
         harness.service(signer_factory=lambda: public_signer).generate_and_seal(
             GenerateAndSealRequest(prompt=PROMPT), idempotency_key=IDEMPOTENCY_KEY

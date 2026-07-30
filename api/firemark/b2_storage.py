@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -15,7 +16,14 @@ from urllib.parse import urlsplit
 
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
-from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
+from botocore.exceptions import (  # type: ignore[import-untyped]
+    BotoCoreError,
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 from genblaze_core import KeyStrategy, ObjectStorageSink, StorageBackend
 from genblaze_s3 import S3StorageBackend
 
@@ -25,6 +33,9 @@ from api.firemark.settings import B2AssetsConfig, B2VaultConfig
 
 DEFAULT_MEMORY_LIMIT = 16 * 1024 * 1024
 DEFAULT_STREAM_CHUNK_SIZE = 1024 * 1024
+READBACK_MAX_ATTEMPTS = 5
+READBACK_MAX_WAIT_SECONDS = 10.0
+READBACK_BACKOFF_SECONDS = (0.25, 0.5, 1.0, 2.0)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _METADATA_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9._:/+ -]{1,256}$")
@@ -87,6 +98,30 @@ class B2RetentionError(B2Error):
     """Raised when Object Lock cannot be proven as active COMPLIANCE retention."""
 
 
+class B2ReadbackNotVisibleError(B2OperationError):
+    """An exact version is temporarily absent immediately after upload."""
+
+
+class B2RetentionNotVisibleError(B2RetentionError):
+    """Retention is temporarily absent immediately after a retained upload."""
+
+
+class B2RetentionModeError(B2RetentionError):
+    """Exact-version retention exists but is not COMPLIANCE mode."""
+
+
+class B2RetentionExpiredError(B2RetentionError):
+    """Exact-version COMPLIANCE retention is no longer active."""
+
+
+class B2EventualConsistencyTimeout(B2RetentionError):
+    """Bounded exact-version read-after-write verification exhausted its budget."""
+
+    def __init__(self, *, service_error_code: str | None = None) -> None:
+        super().__init__("B2 exact-version readback did not become visible in time")
+        self.service_error_code = service_error_code
+
+
 class B2DeleteProofError(B2Error):
     """Raised when a failed delete cannot be attributed safely to active retention."""
 
@@ -123,6 +158,9 @@ B2SafeCategory = Literal[
     "HASH_MISMATCH",
     "VERSION_ID_MISSING",
     "RETENTION_VERIFICATION_FAILURE",
+    "RETENTION_EVENTUAL_CONSISTENCY_TIMEOUT",
+    "RETENTION_MODE_INVALID",
+    "RETENTION_EXPIRED",
     "STORAGE_READBACK_FAILURE",
     "NETWORK_FAILURE",
     "PROVIDER_UNAVAILABLE",
@@ -144,6 +182,9 @@ def classify_b2_failure(exc: BaseException, *, stage: str = "") -> B2FailureInfo
     current: BaseException | None = exc
     service_code: str | None = None
     transport = False
+    eventual_timeout = False
+    invalid_retention_mode = False
+    expired_retention = False
     classified: BaseException = exc
     while current is not None:
         if isinstance(current, ClientError):
@@ -151,6 +192,12 @@ def classify_b2_failure(exc: BaseException, *, stage: str = "") -> B2FailureInfo
             break
         if isinstance(current, BotoCoreError):
             transport = True
+        if isinstance(current, B2EventualConsistencyTimeout):
+            eventual_timeout = True
+        if isinstance(current, B2RetentionModeError):
+            invalid_retention_mode = True
+        if isinstance(current, B2RetentionExpiredError):
+            expired_retention = True
         if isinstance(
             current,
             (
@@ -186,6 +233,12 @@ def classify_b2_failure(exc: BaseException, *, stage: str = "") -> B2FailureInfo
         return B2FailureInfo("RETENTION_REJECTED", service_code)
     if isinstance(classified, B2IntegrityError):
         return B2FailureInfo("HASH_MISMATCH", service_code)
+    if eventual_timeout:
+        return B2FailureInfo("RETENTION_EVENTUAL_CONSISTENCY_TIMEOUT", service_code)
+    if invalid_retention_mode:
+        return B2FailureInfo("RETENTION_MODE_INVALID", service_code)
+    if expired_retention:
+        return B2FailureInfo("RETENTION_EXPIRED", service_code)
     if isinstance(classified, B2RetentionError):
         return B2FailureInfo("RETENTION_VERIFICATION_FAILURE", service_code)
     if isinstance(classified, B2InvalidMetadataError):
@@ -795,7 +848,9 @@ def generate_presigned_get(
             HttpMethod="GET",
         )
     except (BotoCoreError, ClientError) as exc:
-        raise B2OperationError(_safe_operation_error("generate_presigned_url", bucket, key)) from exc
+        raise B2OperationError(
+            _safe_operation_error("generate_presigned_url", bucket, key)
+        ) from exc
     return RedactedPresignedURL(url, ttl)
 
 
@@ -868,7 +923,9 @@ def verify_bucket_object_lock_enabled(client: S3Client, *, bucket: str) -> None:
     try:
         response = client.get_object_lock_configuration(Bucket=bucket)
     except (BotoCoreError, ClientError) as exc:
-        raise B2RetentionError(_safe_operation_error("get_object_lock_configuration", bucket)) from exc
+        raise B2RetentionError(
+            _safe_operation_error("get_object_lock_configuration", bucket)
+        ) from exc
     configuration = response.get("ObjectLockConfiguration")
     if not isinstance(configuration, dict) or configuration.get("ObjectLockEnabled") != "Enabled":
         raise B2RetentionError("Vault bucket does not report Object Lock enabled")
@@ -901,16 +958,88 @@ def read_object_retention(
         raise B2RetentionError(_safe_operation_error("get_object_retention", bucket, key)) from exc
     retention = response.get("Retention")
     if not isinstance(retention, dict):
-        raise B2RetentionError("B2 returned no object retention")
+        raise B2RetentionNotVisibleError("B2 returned no object retention")
     mode = retention.get("Mode")
     if mode != "COMPLIANCE":
-        raise B2RetentionError("B2 object retention is not COMPLIANCE")
+        raise B2RetentionModeError("B2 object retention is not COMPLIANCE")
     retain_until = _response_datetime(retention.get("RetainUntilDate"), "RetainUntilDate")
     return RetentionState(mode=mode, retain_until=retain_until)
 
 
 def _retention_covers(returned: datetime, requested: datetime) -> bool:
-    return returned >= requested or requested - returned < timedelta(seconds=1)
+    normalized_returned = returned.astimezone(UTC)
+    normalized_requested = requested.astimezone(UTC)
+    return normalized_returned >= normalized_requested or (
+        normalized_requested - normalized_returned < timedelta(seconds=1)
+    )
+
+
+_RETRYABLE_TRANSPORT_ERRORS = (
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
+_RETRYABLE_READBACK_CODES = {"NoSuchKey", "NoSuchVersion", "NotFound", "404"}
+
+
+@dataclass
+class _ReadbackBudget:
+    started_at: float
+    attempts: int = 0
+
+
+def _service_code_from_chain(exc: BaseException) -> str | None:
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, ClientError):
+            return _service_code(current)
+        current = current.__cause__
+    return None
+
+
+def _retryable_readback(exc: BaseException) -> bool:
+    if isinstance(exc, (B2ReadbackNotVisibleError, B2RetentionNotVisibleError)):
+        return True
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, ClientError):
+            return _service_code(current) in _RETRYABLE_READBACK_CODES
+        if isinstance(current, _RETRYABLE_TRANSPORT_ERRORS):
+            return True
+        current = current.__cause__
+    return False
+
+
+def _bounded_exact_readback[ReadbackValue](
+    operation: Callable[[], ReadbackValue],
+    *,
+    budget: _ReadbackBudget,
+    sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> ReadbackValue:
+    last_error: BaseException | None = None
+    while budget.attempts < READBACK_MAX_ATTEMPTS:
+        budget.attempts += 1
+        try:
+            return operation()
+        except Exception as exc:
+            if not _retryable_readback(exc):
+                raise
+            last_error = exc
+            elapsed = monotonic() - budget.started_at
+            if budget.attempts >= READBACK_MAX_ATTEMPTS or elapsed >= READBACK_MAX_WAIT_SECONDS:
+                break
+            delay = READBACK_BACKOFF_SECONDS[
+                min(budget.attempts - 1, len(READBACK_BACKOFF_SECONDS) - 1)
+            ]
+            remaining = READBACK_MAX_WAIT_SECONDS - elapsed
+            sleep(min(delay, max(0.0, remaining)))
+    raise B2EventualConsistencyTimeout(
+        service_error_code=(
+            _service_code_from_chain(last_error) if last_error is not None else None
+        )
+    ) from last_error
 
 
 def _locked_receipt(
@@ -927,35 +1056,57 @@ def _locked_receipt(
     stage_callback: Callable[[str], None] | None = None,
     hash_verification_stage: str | None = None,
     retention_verification_stage: str | None = None,
+    retry_sleep: Callable[[float], None] = time.sleep,
+    retry_monotonic: Callable[[], float] = time.monotonic,
 ) -> LockedObjectReceipt:
     if version_id is None or not version_id.strip():
         raise B2VersionIdError("Locked upload requires an exact VersionId")
     if stage_callback is not None and hash_verification_stage is not None:
         stage_callback(hash_verification_stage)
-    head = head_object_receipt(
-        client,
-        bucket=bucket,
-        key=key,
-        expected_sha256=digest,
-        version_id=version_id,
-    )
-    if head is None or head.size_bytes != size_bytes:
-        raise B2IntegrityError("Locked B2 object metadata did not verify")
-    download_bytes_verified(
-        client,
-        bucket=bucket,
-        key=key,
-        expected_sha256=digest,
-        version_id=version_id,
-        max_bytes=max(DEFAULT_MEMORY_LIMIT, size_bytes),
+    budget = _ReadbackBudget(started_at=retry_monotonic())
+
+    def verify_hash() -> StoredObjectReceipt:
+        receipt = head_object_receipt(
+            client,
+            bucket=bucket,
+            key=key,
+            expected_sha256=digest,
+            version_id=version_id,
+        )
+        if receipt is None:
+            raise B2ReadbackNotVisibleError("Exact uploaded version is not visible")
+        if receipt.version_id != version_id:
+            raise B2VersionIdError("Readback returned a different VersionId")
+        if receipt.size_bytes != size_bytes:
+            raise B2IntegrityError("Locked B2 object metadata did not verify")
+        download_bytes_verified(
+            client,
+            bucket=bucket,
+            key=key,
+            expected_sha256=digest,
+            version_id=version_id,
+            max_bytes=max(DEFAULT_MEMORY_LIMIT, size_bytes),
+        )
+        return receipt
+
+    head = _bounded_exact_readback(
+        verify_hash,
+        budget=budget,
+        sleep=retry_sleep,
+        monotonic=retry_monotonic,
     )
     if stage_callback is not None and retention_verification_stage is not None:
         stage_callback(retention_verification_stage)
-    state = read_object_retention(
-        client,
-        bucket=bucket,
-        key=key,
-        version_id=version_id,
+    state = _bounded_exact_readback(
+        lambda: read_object_retention(
+            client,
+            bucket=bucket,
+            key=key,
+            version_id=version_id,
+        ),
+        budget=budget,
+        sleep=retry_sleep,
+        monotonic=retry_monotonic,
     )
     if not _retention_covers(state.retain_until, requested_retention):
         raise B2RetentionError("Confirmed retention is earlier than requested")
@@ -965,6 +1116,82 @@ def _locked_receipt(
         etag=etag or head.etag,
         retention_until=state.retain_until,
         retention_verified=True,
+    )
+
+
+def verify_locked_object_exact(
+    client: S3Client,
+    *,
+    bucket: str,
+    key: str,
+    expected_sha256: str,
+    version_id: str,
+    max_bytes: int = DEFAULT_MEMORY_LIMIT,
+    now: datetime | None = None,
+    retry_sleep: Callable[[float], None] = time.sleep,
+    retry_monotonic: Callable[[], float] = time.monotonic,
+    hash_verification_callback: Callable[[], None] | None = None,
+    retention_verification_callback: Callable[[], None] | None = None,
+) -> tuple[LockedObjectReceipt, bytes]:
+    """Verify one existing immutable version and active COMPLIANCE retention."""
+    exact_version = _required_version_id(version_id)
+    budget = _ReadbackBudget(started_at=retry_monotonic())
+
+    def verify_bytes() -> tuple[StoredObjectReceipt, bytes]:
+        receipt = head_object_receipt(
+            client,
+            bucket=bucket,
+            key=key,
+            expected_sha256=expected_sha256,
+            version_id=exact_version,
+        )
+        if receipt is None:
+            raise B2ReadbackNotVisibleError("Exact retained version is not visible")
+        if receipt.version_id != exact_version:
+            raise B2VersionIdError("Readback returned a different VersionId")
+        payload = download_bytes_verified(
+            client,
+            bucket=bucket,
+            key=key,
+            expected_sha256=expected_sha256,
+            version_id=exact_version,
+            max_bytes=max_bytes,
+        )
+        if receipt.size_bytes != len(payload):
+            raise B2IntegrityError("Exact retained object size did not verify")
+        return receipt, payload
+
+    if hash_verification_callback is not None:
+        hash_verification_callback()
+    receipt, payload = _bounded_exact_readback(
+        verify_bytes,
+        budget=budget,
+        sleep=retry_sleep,
+        monotonic=retry_monotonic,
+    )
+    if retention_verification_callback is not None:
+        retention_verification_callback()
+    retention = _bounded_exact_readback(
+        lambda: read_object_retention(
+            client,
+            bucket=bucket,
+            key=key,
+            version_id=exact_version,
+        ),
+        budget=budget,
+        sleep=retry_sleep,
+        monotonic=retry_monotonic,
+    )
+    timestamp = (now or datetime.now(UTC)).astimezone(UTC)
+    if retention.retain_until <= timestamp:
+        raise B2RetentionExpiredError("B2 COMPLIANCE retention is expired")
+    return (
+        LockedObjectReceipt(
+            **receipt.model_dump(),
+            retention_until=retention.retain_until,
+            retention_verified=True,
+        ),
+        payload,
     )
 
 
@@ -982,6 +1209,8 @@ def upload_locked_bytes(
     upload_stage: str | None = None,
     hash_verification_stage: str | None = None,
     retention_verification_stage: str | None = None,
+    retry_sleep: Callable[[float], None] = time.sleep,
+    retry_monotonic: Callable[[], float] = time.monotonic,
 ) -> LockedObjectReceipt:
     """Write bytes with COMPLIANCE retention and verify both bytes and retention."""
     if stage_callback is not None and upload_stage is not None:
@@ -1019,13 +1248,20 @@ def upload_locked_bytes(
             stage_callback=stage_callback,
             hash_verification_stage=hash_verification_stage,
             retention_verification_stage=retention_verification_stage,
+            retry_sleep=retry_sleep,
+            retry_monotonic=retry_monotonic,
         )
-    except B2Error as exc:
+    except Exception as exc:
+        if isinstance(exc, B2Error):
+            if version_id is not None:
+                raise B2PersistedObjectError(key=key, version_id=version_id, retained=True) from exc
+            raise
+        safe_error = B2OperationError("B2 locked-object verification returned invalid evidence")
         if version_id is not None:
             raise B2PersistedObjectError(
                 key=key, version_id=version_id, retained=True
-            ) from exc
-        raise
+            ) from safe_error
+        raise safe_error from exc
 
 
 def upload_locked_file(
@@ -1042,6 +1278,8 @@ def upload_locked_file(
     upload_stage: str | None = None,
     hash_verification_stage: str | None = None,
     retention_verification_stage: str | None = None,
+    retry_sleep: Callable[[float], None] = time.sleep,
+    retry_monotonic: Callable[[], float] = time.monotonic,
 ) -> LockedObjectReceipt:
     """Stream a file into COMPLIANCE custody and verify the exact version."""
     if stage_callback is not None and upload_stage is not None:
@@ -1080,13 +1318,20 @@ def upload_locked_file(
             stage_callback=stage_callback,
             hash_verification_stage=hash_verification_stage,
             retention_verification_stage=retention_verification_stage,
+            retry_sleep=retry_sleep,
+            retry_monotonic=retry_monotonic,
         )
-    except B2Error as exc:
+    except Exception as exc:
+        if isinstance(exc, B2Error):
+            if version_id is not None:
+                raise B2PersistedObjectError(key=key, version_id=version_id, retained=True) from exc
+            raise
+        safe_error = B2OperationError("B2 locked-object verification returned invalid evidence")
         if version_id is not None:
             raise B2PersistedObjectError(
                 key=key, version_id=version_id, retained=True
-            ) from exc
-        raise
+            ) from safe_error
+        raise safe_error from exc
 
 
 def prove_locked_delete_denial(

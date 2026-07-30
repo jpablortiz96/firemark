@@ -112,6 +112,7 @@ SignerFactory = Callable[[], Ed25519Signer]
 CustodyExecutor = Callable[..., B2CustodyReceipt]
 SealedUploader = Callable[..., StoredObjectReceipt]
 StageCallback = Callable[[str], None]
+CheckpointCallback = Callable[[str, dict[str, Any]], None]
 
 
 def _request_fingerprint(prompt: str, model: str, size: str) -> str:
@@ -202,6 +203,7 @@ class GenerateAndSealService:
         sealed_uploader: SealedUploader = upload_bytes_verified,
         now: Callable[[], datetime] | None = None,
         stage_callback: StageCallback | None = None,
+        checkpoint_callback: CheckpointCallback | None = None,
     ) -> None:
         self.certificate_service = certificate_service
         self.provider_factory = provider_factory
@@ -221,11 +223,10 @@ class GenerateAndSealService:
         self.sealed_uploader = sealed_uploader
         self._now = now or (lambda: datetime.now(UTC))
         self._stage_callback = stage_callback or (lambda _stage: None)
+        self._checkpoint_callback = checkpoint_callback or (lambda _event, _values: None)
         self._lock = threading.Lock()
 
-    def _completed(
-        self, cert_id: str, run_id: str, asset_id: str
-    ) -> GenerateAndSealResult | None:
+    def _completed(self, cert_id: str, run_id: str, asset_id: str) -> GenerateAndSealResult | None:
         certificate = self.certificate_service.repository.get_certificate(cert_id)
         if certificate is None:
             return None
@@ -310,6 +311,25 @@ class GenerateAndSealService:
             if hmac.compare_digest(source_sha256, sealed_sha256):
                 raise GenerateAndSealError("SEALED_HASH_UNCHANGED")
             retention_until = timestamp + timedelta(days=self.retention_days)
+            self._checkpoint_callback(
+                "prepared",
+                {
+                    "run_id": run_id,
+                    "asset_id": asset_id,
+                    "cert_id": cert_id,
+                    "source_sha256": source_sha256,
+                    "sealed_sha256": sealed_sha256,
+                    "canonical_hash": canonical_hash,
+                    "issued_at": timestamp,
+                    "requested_retention_until": retention_until,
+                    "signer_key_id": signer.signer_key_id,
+                    "provider": image.provider,
+                    "model": image.model,
+                    "size": size,
+                    "source_bytes": image.data,
+                    "manifest_bytes": manifest_bytes,
+                },
+            )
             self._stage_callback("vault_source_upload")
             assets_client = self.assets_client_factory()
             vault_client = self.vault_client_factory()
@@ -333,6 +353,7 @@ class GenerateAndSealService:
                     now=timestamp,
                     stage_callback=self._stage_callback,
                 )
+            self._checkpoint_callback("custody_persisted", {"custody_receipt": custody_receipt})
             self._stage_callback("sealed_asset_upload")
             sealed_key = sealed_asset_key(sealed_sha256)
             sealed_receipt = self.sealed_uploader(
@@ -353,9 +374,8 @@ class GenerateAndSealService:
                 hash_verification_stage="sealed_asset_hash_verification",
             )
             if sealed_receipt.version_id is None:
-                raise GenerateAndSealError(
-                    "SEALED_VERSION_UNAVAILABLE", partial_keys=(sealed_key,)
-                )
+                raise GenerateAndSealError("SEALED_VERSION_UNAVAILABLE", partial_keys=(sealed_key,))
+            self._checkpoint_callback("sealed_persisted", {"sealed_receipt": sealed_receipt})
             self._stage_callback("custody_receipt_construction")
             if sealed_receipt.sha256 != sealed_sha256:
                 raise GenerateAndSealError("SEALED_HASH_MISMATCH")
@@ -440,15 +460,14 @@ class GenerateAndSealService:
                     asset_id=asset_id,
                     run_id=run_id,
                 )
+                self._checkpoint_callback("registered", {})
             except Exception as exc:
                 partial = (
                     sealed_key,
                     custody_receipt.vault_source.key,
                     custody_receipt.vault_manifest.key,
                 )
-                raise GenerateAndSealError(
-                    "REGISTRATION_FAILED", partial_keys=partial
-                ) from exc
+                raise GenerateAndSealError("REGISTRATION_FAILED", partial_keys=partial) from exc
             completed = self._completed(cert_id, run_id, asset_id)
             if completed is None:
                 raise GenerateAndSealError("REGISTRATION_NOT_VISIBLE")

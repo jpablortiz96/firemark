@@ -335,6 +335,40 @@ VersionIds, retention timestamps, package versions, and stage results. It exclud
 all credentials and bearer headers, signing private material, full private Manifest, provider
 response, and raw delivery URL.
 
+The full live smoke writes `.artifacts/generate-and-seal-checkpoint.json` atomically before its
+first remote write and updates it after custody, sealed-asset persistence, registration, and final
+verification. Raw source and private Manifest working files are stored separately under the
+ignored `.artifacts/generate-and-seal-private/` tree; the safe checkpoint contains only recovery
+identifiers, hashes, exact object versions, retention timestamps, and local paths. It never stores
+the prompt, credentials, private key, provider response, object bytes, or a transient URL.
+
+If a production Generate & Seal operation stops after provider generation, do not repeat the live
+smoke and do not make another provider request. Review the provider-free command first, then let a
+single owner explicitly resume the checkpoint:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\resume_generate_and_seal_checkpoint.py
+D:\firemark\.venv\Scripts\python.exe scripts\resume_generate_and_seal_checkpoint.py --live `
+  --output-report .artifacts\generate-and-seal-report.json --force
+```
+
+Non-live recovery exits with informational code 2 and constructs no OpenAI, B2, or Supabase
+client. Live recovery never constructs or calls OpenAI. It reads the safe checkpoint first,
+validates bounded exact vault versions and their active COMPLIANCE retention, reconstructs the
+same capsule and sealed bytes, reuses an identical sealed version when present, registers the
+certificate atomically and idempotently, and completes verification and delivery. It never creates
+a new vault source or Manifest version, changes retention, deletes a vault object, or persists a
+delivery URL. A pre-checkpoint legacy bundle can be discovered through B2, but recovery returns
+`INCOMPLETE_EVIDENCE` without writes when exact capsule IDs or timestamps cannot be recovered.
+
+Exact-version read-after-write verification uses one shared bounded retry budget: at most five
+attempts and ten seconds total with short backoff. Only temporary `NoSuchKey`, `NoSuchVersion`,
+`NotFound`, absent immediate retention, and retryable transport failures are retried. Permission,
+credential, bucket, Object Lock mode, expired retention, wrong VersionId, malformed response, and
+hash failures fail immediately. Every head, download, and retention request includes the exact
+VersionId, and retention timestamps are normalized to UTC with safe sub-second service
+normalization.
+
 When Generate & Seal reaches B2 but fails before registration, isolate custody without repeating
 the provider request or contacting Supabase:
 
@@ -472,7 +506,8 @@ or verify a complete Manifest without resolving `manifest_uri`.
 The historical B2 Custody smoke uses a local fixture and therefore does not prove provider
 generation. The B2 and Supabase live checkpoints are environment-specific evidence, not a claim
 that the complete application is deployed. Generate & Seal has comprehensive zero-network contract
-tests, but no real OpenAI generation evidence exists until the owner runs its explicit live command.
+tests; environment-specific real OpenAI and isolated B2 evidence exists, while the interrupted
+combined checkpoint is not a completed production certificate.
 The public frontend, Birth Certificate experience, Verify Gate user experience, deployment, real
 demo generation, and hackathon submission remain pending. B2 custody spans multiple objects and is
 not cross-object atomic; a registration failure can leave safe, billable partial storage that must

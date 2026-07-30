@@ -54,15 +54,11 @@ def _receipt() -> B2CustodyReceipt:
     return B2CustodyReceipt(
         source_sha256=source_digest,
         canonical_hash="c" * 64,
-        assets_source=_stored(
-            bucket="assets-test", key="assets/source.png", digest=source_digest
-        ),
+        assets_source=_stored(bucket="assets-test", key="assets/source.png", digest=source_digest),
         assets_manifest=_stored(
             bucket="assets-test", key="manifests/run.json", digest=manifest_digest
         ),
-        vault_source=_locked(
-            bucket="vault-test", key="vault/source.png", digest=source_digest
-        ),
+        vault_source=_locked(bucket="vault-test", key="vault/source.png", digest=source_digest),
         vault_manifest=_locked(
             bucket="vault-test", key="vault/manifest.json", digest=manifest_digest
         ),
@@ -174,6 +170,7 @@ def test_complete_custody_workflow_verifies_four_objects(tmp_path: Path) -> None
     source, source_digest, manifest_bytes, canonical_hash = _fixture_manifest(tmp_path)
     assets = FakeS3Client()
     vault = FakeS3Client()
+    persisted: list[tuple[object, ...]] = []
     receipt = execute_b2_custody(
         assets_client=assets,
         vault_client=vault,
@@ -189,6 +186,7 @@ def test_complete_custody_workflow_verifies_four_objects(tmp_path: Path) -> None
         retention_until=datetime.now(UTC) + timedelta(days=1),
         source_content_type="image/png",
         now=datetime(2026, 1, 1, tzinfo=UTC),
+        persistence_callback=persisted.append,
     )
     assert receipt.custody_verified is True
     assert receipt.source_sha256 == source_digest
@@ -197,6 +195,10 @@ def test_complete_custody_workflow_verifies_four_objects(tmp_path: Path) -> None
     assert receipt.vault_manifest.sha256 == sha256_bytes(manifest_bytes)
     assert len(assets.objects) == 2
     assert len(vault.objects) == 2
+    assert [len(snapshot) for snapshot in persisted] == [1, 2, 3, 4]
+    assert persisted[-1][-1].bucket_role == "vault"
+    assert persisted[-1][-1].object_kind == "manifest"
+    assert persisted[-1][-1].version_id == receipt.vault_manifest.version_id
 
     second = execute_b2_custody(
         assets_client=assets,
@@ -266,11 +268,7 @@ def test_partial_workflow_failure_cleans_assets_but_never_vault(tmp_path: Path) 
         )
     assert len(captured.value.partial_keys) == 2
     assert [name for name, _ in assets.calls].count("delete_object") == 2
-    assert all(
-        values.get("VersionId")
-        for name, values in assets.calls
-        if name == "delete_object"
-    )
+    assert all(values.get("VersionId") for name, values in assets.calls if name == "delete_object")
     assert "delete_object" not in [name for name, _ in vault.calls]
 
 

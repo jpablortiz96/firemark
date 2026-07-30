@@ -242,6 +242,7 @@ def execute_b2_custody(
     manifest_content_type: str = "application/json",
     now: datetime | None = None,
     stage_callback: Callable[[str], None] | None = None,
+    persistence_callback: Callable[[tuple[PartialB2Object, ...]], None] | None = None,
 ) -> B2CustodyReceipt:
     """Store and verify four objects without claiming cross-object atomicity."""
     from api.firemark.b2_storage import (
@@ -325,6 +326,8 @@ def execute_b2_custody(
         partial_objects.append(
             PartialB2Object("assets", "source", source_key, assets_source.version_id, False)
         )
+        if persistence_callback is not None:
+            persistence_callback(tuple(partial_objects))
         begin("vault_source_upload", role="assets", kind="manifest")
         assets_manifest = head_object_receipt(
             assets_client,
@@ -356,10 +359,10 @@ def execute_b2_custody(
             )
         partial_keys.append(manifest_key)
         partial_objects.append(
-            PartialB2Object(
-                "assets", "manifest", manifest_key, assets_manifest.version_id, False
-            )
+            PartialB2Object("assets", "manifest", manifest_key, assets_manifest.version_id, False)
         )
+        if persistence_callback is not None:
+            persistence_callback(tuple(partial_objects))
         begin("vault_source_upload", role="vault", kind="source")
         existing_vault_source = head_object_receipt(
             vault_client,
@@ -407,10 +410,10 @@ def execute_b2_custody(
             )
         partial_keys.append(locked_source_key)
         partial_objects.append(
-            PartialB2Object(
-                "vault", "source", locked_source_key, vault_source.version_id, True
-            )
+            PartialB2Object("vault", "source", locked_source_key, vault_source.version_id, True)
         )
+        if persistence_callback is not None:
+            persistence_callback(tuple(partial_objects))
         begin("vault_manifest_upload", role="vault", kind="manifest")
         existing_vault_manifest = head_object_receipt(
             vault_client,
@@ -462,6 +465,8 @@ def execute_b2_custody(
                 "vault", "manifest", locked_manifest_key, vault_manifest.version_id, True
             )
         )
+        if persistence_callback is not None:
+            persistence_callback(tuple(partial_objects))
     except Exception as exc:
         if (
             isinstance(exc, B2PersistedObjectError)

@@ -21,7 +21,6 @@ from api.firemark.b2_storage import (
     classify_b2_failure,
     create_assets_client,
     create_vault_client,
-    delete_unlocked_version_verified,
     upload_bytes_verified,
 )
 from api.firemark.bootstrap import build_runtime
@@ -33,6 +32,16 @@ from api.firemark.custody import (
     execute_b2_custody,
 )
 from api.firemark.generate_and_seal import GenerateAndSealRequest
+from api.firemark.generate_checkpoint import (
+    DEFAULT_CHECKPOINT_PATH,
+    DEFAULT_PRIVATE_ROOT,
+    CheckpointPartialObject,
+    GenerateAndSealCheckpoint,
+    checkpoint_object,
+    read_checkpoint,
+    write_checkpoint_atomic,
+    write_private_evidence_atomic,
+)
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
 from api.firemark.generation.openai_provider import OpenAIImageProvider
 from api.firemark.generation.provider import GenerationProviderError
@@ -166,7 +175,15 @@ class StageTracker:
 class Capture:
     """Observe safe outputs while delegating every live operation exactly once."""
 
-    def __init__(self, provider: OpenAIImageProvider, stage_callback: Any = None) -> None:
+    def __init__(
+        self,
+        provider: OpenAIImageProvider,
+        stage_callback: Any = None,
+        *,
+        tracker: StageTracker | None = None,
+        checkpoint_path: Path = DEFAULT_CHECKPOINT_PATH,
+        private_root: Path = DEFAULT_PRIVATE_ROOT,
+    ) -> None:
         self.provider = provider
         self.stage_callback = stage_callback or (lambda _stage: None)
         self.provider_calls = 0
@@ -177,6 +194,76 @@ class Capture:
         self.sealed_bytes: bytes | None = None
         self.assets_client: Any = None
         self.vault_client: Any = None
+        self.tracker = tracker
+        self.checkpoint_path = checkpoint_path
+        self.private_root = private_root
+
+    def _checkpoint(self) -> GenerateAndSealCheckpoint:
+        return read_checkpoint(self.checkpoint_path)
+
+    def _write_checkpoint(self, checkpoint: GenerateAndSealCheckpoint) -> None:
+        stages = tuple(self.tracker.completed) if self.tracker is not None else ()
+        write_checkpoint_atomic(
+            self.checkpoint_path,
+            checkpoint.model_copy(update={"stage_results": stages}),
+        )
+
+    def checkpoint_event(self, event: str, values: dict[str, Any]) -> None:
+        """Persist allowlisted recovery state after each irreversible boundary."""
+        if event == "prepared":
+            source = values.pop("source_bytes")
+            manifest = values.pop("manifest_bytes")
+            source_path, manifest_path = write_private_evidence_atomic(
+                self.private_root,
+                run_id=values["run_id"],
+                source_bytes=source,
+                manifest_bytes=manifest,
+            )
+            checkpoint = GenerateAndSealCheckpoint(
+                operation_state="prepared",
+                generated_byte_count=len(source),
+                source_path=str(source_path),
+                manifest_path=str(manifest_path),
+                **values,
+            )
+            self._write_checkpoint(checkpoint)
+            return
+        checkpoint = self._checkpoint()
+        if event == "custody_persisted":
+            custody = values["custody_receipt"]
+            checkpoint = checkpoint.model_copy(
+                update={
+                    "operation_state": "custody_persisted",
+                    "assets_source": checkpoint_object(
+                        custody.assets_source, bucket_role="assets", object_kind="source"
+                    ),
+                    "assets_manifest": checkpoint_object(
+                        custody.assets_manifest, bucket_role="assets", object_kind="manifest"
+                    ),
+                    "vault_source": checkpoint_object(
+                        custody.vault_source, bucket_role="vault", object_kind="source"
+                    ),
+                    "vault_manifest": checkpoint_object(
+                        custody.vault_manifest, bucket_role="vault", object_kind="manifest"
+                    ),
+                }
+            )
+        elif event == "sealed_persisted":
+            checkpoint = checkpoint.model_copy(
+                update={
+                    "operation_state": "sealed_persisted",
+                    "sealed_asset": checkpoint_object(
+                        values["sealed_receipt"],
+                        bucket_role="assets",
+                        object_kind="sealed",
+                    ),
+                }
+            )
+        elif event == "registered":
+            checkpoint = checkpoint.model_copy(update={"operation_state": "registered"})
+        else:
+            raise LiveSmokeError("CHECKPOINT_EVENT_INVALID")
+        self._write_checkpoint(checkpoint)
 
     def generate_image(self, request: GenerationRequest) -> GeneratedImage:
         self.provider_calls += 1
@@ -190,8 +277,30 @@ class Capture:
 
     def custody_executor(self, **kwargs: Any) -> B2CustodyReceipt:
         self.manifest_bytes = kwargs["manifest_bytes"]
-        self.custody = execute_b2_custody(**kwargs)
+        kwargs["persistence_callback"] = self.checkpoint_partials
+        try:
+            self.custody = execute_b2_custody(**kwargs)
+        except B2CustodyWorkflowError as exc:
+            try:
+                checkpoint = self._checkpoint()
+                partials = tuple(
+                    CheckpointPartialObject.model_validate(item.__dict__)
+                    for item in exc.partial_objects
+                )
+                self._write_checkpoint(checkpoint.model_copy(update={"partial_objects": partials}))
+            except Exception:
+                # Preserve the precise B2 failure if a secondary checkpoint write fails.
+                pass
+            raise
         return self.custody
+
+    def checkpoint_partials(self, partial_objects: tuple[Any, ...]) -> None:
+        """Durably record every exact version as soon as custody persists it."""
+        checkpoint = self._checkpoint()
+        partials = tuple(
+            CheckpointPartialObject.model_validate(item.__dict__) for item in partial_objects
+        )
+        self._write_checkpoint(checkpoint.model_copy(update={"partial_objects": partials}))
 
     def sealed_uploader(self, client: Any, **kwargs: Any) -> StoredObjectReceipt:
         self.sealed_bytes = kwargs["data"]
@@ -273,6 +382,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 max_image_bytes=config.max_generated_image_bytes,
             ),
             tracker.begin,
+            tracker=tracker,
         )
 
         def assets_factory() -> Any:
@@ -294,6 +404,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 "custody_executor": capture.custody_executor,
                 "sealed_uploader": capture.sealed_uploader,
                 "stage_callback": tracker.begin,
+                "checkpoint_callback": capture.checkpoint_event,
             },
         )
         service = runtime.generate_and_seal_service
@@ -312,7 +423,10 @@ def run_live(report_path: Path, *, force: bool) -> int:
             raise LiveSmokeError("EXACTLY_ONE_AI_GENERATION_REQUIRED")
         if sha256_bytes(capture.image.data) != result.source_sha256:
             raise LiveSmokeError("SOURCE_HASH_MISMATCH")
-        if capture.manifest_bytes is None or result.canonical_hash.encode() not in capture.manifest_bytes:
+        if (
+            capture.manifest_bytes is None
+            or result.canonical_hash.encode() not in capture.manifest_bytes
+        ):
             raise LiveSmokeError("PRIVATE_MANIFEST_INVALID")
         if capture.sealed_bytes is None:
             raise LiveSmokeError("SEALED_BYTES_UNAVAILABLE")
@@ -358,9 +472,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
         delivery = client.post(
             f"/v1/delivery/{result.cert_id}",
             json={"presented_sha256": result.sealed_sha256},
-            headers={
-                "Authorization": f"Bearer {config.delivery_api_key.get_secret_value()}"
-            },
+            headers={"Authorization": f"Bearer {config.delivery_api_key.get_secret_value()}"},
         )
         if delivery.status_code != 200:
             raise LiveSmokeError("DELIVERY_AUTHORIZATION_FAILED")
@@ -392,6 +504,8 @@ def run_live(report_path: Path, *, force: bool) -> int:
             config.b2.vault.app_key.get_secret_value(),
         ]
         _database_secret_scan(runtime.repository, result, secret_values)
+        checkpoint = capture._checkpoint().model_copy(update={"operation_state": "complete"})
+        capture._write_checkpoint(checkpoint)
         tracker.begin("safe_report")
         report = {
             "schema_version": "firemark.generate-and-seal-report.v1",
@@ -430,18 +544,6 @@ def run_live(report_path: Path, *, force: bool) -> int:
         tracker.complete_current()
         return 0
     except Exception as exc:
-        if capture is not None and capture.sealed is not None and capture.assets_client is not None:
-            try:
-                delete_unlocked_version_verified(
-                    capture.assets_client,
-                    bucket=capture.sealed.bucket,
-                    key=capture.sealed.key,
-                    version_id=capture.sealed.version_id,
-                    expected_sha256=capture.sealed.sha256,
-                    known_unlocked=True,
-                )
-            except B2Error:
-                pass
         tracker.fail(exc)
         return 1
 

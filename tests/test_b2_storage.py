@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import io
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +14,18 @@ from api.firemark.b2_storage import (
     B2CleanupError,
     B2ConfigurationError,
     B2DeleteProofError,
+    B2EventualConsistencyTimeout,
     B2IntegrityError,
     B2OperationError,
+    B2PersistedObjectError,
     B2RetentionError,
+    B2RetentionExpiredError,
+    B2RetentionModeError,
     RedactedPresignedURL,
     assets_manifest_key,
     assets_source_key,
     check_bucket_access,
+    classify_b2_failure,
     create_assets_client,
     create_genblaze_assets_backend,
     create_genblaze_assets_sink,
@@ -44,6 +49,7 @@ from api.firemark.b2_storage import (
     vault_manifest_key,
     vault_source_key,
     verify_bucket_object_lock_enabled,
+    verify_locked_object_exact,
 )
 from api.firemark.custody import LockedObjectReceipt
 from api.firemark.hashing import sha256_bytes
@@ -544,6 +550,253 @@ def test_locked_bytes_send_compliance_and_preserve_version(fake_s3: FakeS3Client
     assert receipt.retention_mode == "COMPLIANCE"
 
 
+class EventuallyVisibleS3(FakeS3Client):
+    """Sequence-controlled exact-version readback double."""
+
+    def __init__(self, *, head_misses: int = 0, retention_misses: int = 0) -> None:
+        super().__init__()
+        self.head_misses = head_misses
+        self.retention_misses = retention_misses
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        if self.head_misses:
+            self.head_misses -= 1
+            self.calls.append(("head_object", kwargs))
+            raise service_error("NotFound", "HeadObject")
+        return super().head_object(**kwargs)
+
+    def get_object_retention(self, **kwargs: Any) -> dict[str, Any]:
+        if self.retention_misses:
+            self.retention_misses -= 1
+            self.calls.append(("get_object_retention", kwargs))
+            return {}
+        return super().get_object_retention(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("head_misses", "retention_misses"),
+    [(1, 0), (0, 1)],
+)
+def test_exact_version_readback_retries_only_temporary_visibility(
+    head_misses: int, retention_misses: int
+) -> None:
+    client = EventuallyVisibleS3(head_misses=head_misses, retention_misses=retention_misses)
+    data = b"eventually visible"
+    digest = sha256_bytes(data)
+    client.put_object(
+        Bucket="vault-test",
+        Key="vault/exact.bin",
+        Body=data,
+        ContentType="application/octet-stream",
+        Metadata={"firemark-sha256": digest},
+        ObjectLockRetainUntilDate=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    sleeps: list[float] = []
+    stages: list[str] = []
+    receipt, downloaded = verify_locked_object_exact(
+        client,
+        bucket="vault-test",
+        key="vault/exact.bin",
+        expected_sha256=digest,
+        version_id="test-version-1",
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+        retry_sleep=sleeps.append,
+        retry_monotonic=lambda: 0.0,
+        hash_verification_callback=lambda: stages.append("hash"),
+        retention_verification_callback=lambda: stages.append("retention"),
+    )
+    assert downloaded == data
+    assert receipt.version_id == "test-version-1"
+    assert len(sleeps) == 1
+    assert 0 < sleeps[0] <= 0.5
+    assert stages == ["hash", "retention"]
+    exact_calls = [
+        values
+        for name, values in client.calls
+        if name in {"head_object", "get_object", "get_object_retention"}
+    ]
+    assert exact_calls
+    assert all(values["VersionId"] == "test-version-1" for values in exact_calls)
+
+
+def test_exact_readback_retry_is_bounded_by_attempts_and_total_wait() -> None:
+    client = EventuallyVisibleS3(head_misses=20)
+    data = b"bounded"
+    digest = sha256_bytes(data)
+    client.put_object(
+        Bucket="vault-test",
+        Key="vault/bounded.bin",
+        Body=data,
+        ContentType="application/octet-stream",
+        Metadata={"firemark-sha256": digest},
+    )
+    clock = [0.0]
+
+    def sleep(delay: float) -> None:
+        clock[0] += delay
+
+    with pytest.raises(B2EventualConsistencyTimeout):
+        verify_locked_object_exact(
+            client,
+            bucket="vault-test",
+            key="vault/bounded.bin",
+            expected_sha256=digest,
+            version_id="test-version-1",
+            retry_sleep=sleep,
+            retry_monotonic=lambda: clock[0],
+        )
+    calls = [name for name, _ in client.calls].count("head_object")
+    assert calls == 5
+    assert clock[0] <= 10.0
+
+
+def test_exact_readback_stops_when_total_deadline_is_reached() -> None:
+    client = EventuallyVisibleS3(head_misses=20)
+    clock = [0.0]
+
+    def sleep(_delay: float) -> None:
+        clock[0] = 10.0
+
+    with pytest.raises(B2EventualConsistencyTimeout):
+        verify_locked_object_exact(
+            client,
+            bucket="vault-test",
+            key="vault/deadline.bin",
+            expected_sha256=DIGEST,
+            version_id="exact-version",
+            retry_sleep=sleep,
+            retry_monotonic=lambda: clock[0],
+        )
+    assert [name for name, _ in client.calls].count("head_object") == 2
+
+
+def test_exact_retention_timestamp_is_normalized_to_utc() -> None:
+    client = FakeS3Client()
+    data = b"timezone"
+    digest = sha256_bytes(data)
+    offset = timezone(timedelta(hours=-5))
+    client.put_object(
+        Bucket="vault-test",
+        Key="vault/timezone.bin",
+        Body=data,
+        ContentType="application/octet-stream",
+        Metadata={"firemark-sha256": digest},
+        ObjectLockRetainUntilDate=datetime(2030, 1, 1, tzinfo=offset),
+    )
+    receipt, _ = verify_locked_object_exact(
+        client,
+        bucket="vault-test",
+        key="vault/timezone.bin",
+        expected_sha256=digest,
+        version_id="test-version-1",
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    assert receipt.retention_until.tzinfo is UTC
+    assert receipt.retention_until.hour == 5
+
+
+@pytest.mark.parametrize("code", ["AccessDenied", "InvalidAccessKeyId"])
+def test_exact_readback_does_not_retry_access_or_credentials(code: str) -> None:
+    client = FakeS3Client()
+    client.raise_for["head_object"] = service_error(code, "HeadObject")
+    with pytest.raises(B2OperationError):
+        verify_locked_object_exact(
+            client,
+            bucket="vault-test",
+            key="vault/denied.bin",
+            expected_sha256=DIGEST,
+            version_id="exact-version",
+            retry_sleep=lambda _delay: pytest.fail("must not sleep"),
+        )
+    assert [name for name, _ in client.calls] == ["head_object"]
+
+
+def test_exact_readback_does_not_retry_mode_expiry_or_hash_mismatch() -> None:
+    data = b"strict retention"
+    digest = sha256_bytes(data)
+    client = FakeS3Client()
+    client.put_object(
+        Bucket="vault-test",
+        Key="vault/strict.bin",
+        Body=data,
+        ContentType="application/octet-stream",
+        Metadata={"firemark-sha256": digest},
+        ObjectLockRetainUntilDate=datetime(2025, 1, 1, tzinfo=UTC),
+    )
+    client.retention_mode = "GOVERNANCE"
+    with pytest.raises(B2RetentionModeError):
+        verify_locked_object_exact(
+            client,
+            bucket="vault-test",
+            key="vault/strict.bin",
+            expected_sha256=digest,
+            version_id="test-version-1",
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            retry_sleep=lambda _delay: pytest.fail("must not sleep"),
+        )
+    client.retention_mode = "COMPLIANCE"
+    with pytest.raises(B2RetentionExpiredError):
+        verify_locked_object_exact(
+            client,
+            bucket="vault-test",
+            key="vault/strict.bin",
+            expected_sha256=digest,
+            version_id="test-version-1",
+            now=datetime(2026, 1, 1, tzinfo=UTC),
+            retry_sleep=lambda _delay: pytest.fail("must not sleep"),
+        )
+    with pytest.raises(B2IntegrityError):
+        verify_locked_object_exact(
+            client,
+            bucket="vault-test",
+            key="vault/strict.bin",
+            expected_sha256=OTHER_DIGEST,
+            version_id="test-version-1",
+            retry_sleep=lambda _delay: pytest.fail("must not sleep"),
+        )
+
+
+def test_unexpected_locked_readback_shape_preserves_stage_and_exact_version() -> None:
+    client = FakeS3Client()
+    client.raise_for["get_object_retention"] = ValueError("unsafe internal detail")
+    data = b"malformed readback"
+    with pytest.raises(B2PersistedObjectError) as raised:
+        upload_locked_bytes(
+            client,
+            bucket="vault-test",
+            key="vault/malformed.bin",
+            data=data,
+            expected_sha256=sha256_bytes(data),
+            content_type="application/octet-stream",
+            retention_until=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+    assert raised.value.version_id == "test-version-1"
+    failure = classify_b2_failure(raised.value, stage="vault_manifest_retention_verification")
+    assert failure.category == "STORAGE_READBACK_FAILURE"
+
+
+def test_unexpected_locked_file_readback_is_safely_wrapped(tmp_path: Path) -> None:
+    client = FakeS3Client()
+    client.raise_for["get_object_retention"] = TypeError("test-only malformed response")
+    path = tmp_path / "source.png"
+    path.write_bytes(b"locked source")
+    with pytest.raises(B2PersistedObjectError) as raised:
+        upload_locked_file(
+            client,
+            bucket="vault-test",
+            key="vault/source.png",
+            path=path,
+            expected_sha256=sha256_bytes(path.read_bytes()),
+            content_type="image/png",
+            retention_until=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+    assert raised.value.version_id == "test-version-1"
+    assert (
+        classify_b2_failure(raised.value, stage="vault_source_retention_verification").category
+        == "STORAGE_READBACK_FAILURE"
+    )
+
+
 def test_locked_file_and_retention_failure_modes(
     fake_s3: FakeS3Client,
     source_file: tuple[Path, bytes],
@@ -614,9 +867,7 @@ def test_delete_denial_requires_full_corroboration(fake_s3: FakeS3Client) -> Non
         "head_object",
         "get_object_retention",
     ]
-    assert all(
-        values["VersionId"] == receipt.version_id for _name, values in proof_calls
-    )
+    assert all(values["VersionId"] == receipt.version_id for _name, values in proof_calls)
 
 
 def test_delete_proof_rejects_missing_version_before_remote_calls(
@@ -649,7 +900,9 @@ def test_delete_proof_rejects_unrelated_service_errors(
 
 def test_delete_proof_rejects_timeout_success_and_missing_afterward(fake_s3: FakeS3Client) -> None:
     receipt = _locked_receipt(fake_s3)
-    fake_s3.raise_for["delete_object"] = EndpointConnectionError(endpoint_url="https://test.invalid")
+    fake_s3.raise_for["delete_object"] = EndpointConnectionError(
+        endpoint_url="https://test.invalid"
+    )
     with pytest.raises(B2DeleteProofError, match="transport"):
         prove_locked_delete_denial(fake_s3, receipt, now=datetime(2026, 1, 1, tzinfo=UTC))
 
@@ -737,15 +990,11 @@ def test_malformed_head_responses_fail_closed(fake_s3: FakeS3Client) -> None:
     obj = next(iter(fake_s3.objects.values()))
     obj["LastModified"] = "not-a-date"
     with pytest.raises(B2OperationError, match="timestamp"):
-        head_object_receipt(
-            fake_s3, bucket="assets-test", key="asset", expected_sha256=digest
-        )
+        head_object_receipt(fake_s3, bucket="assets-test", key="asset", expected_sha256=digest)
     obj["LastModified"] = datetime.now(UTC)
     obj["ContentType"] = ""
     with pytest.raises(B2OperationError, match="no content type"):
-        head_object_receipt(
-            fake_s3, bucket="assets-test", key="asset", expected_sha256=digest
-        )
+        head_object_receipt(fake_s3, bucket="assets-test", key="asset", expected_sha256=digest)
 
     class NegativeLengthClient(FakeS3Client):
         def head_object(self, **kwargs: Any) -> dict[str, Any]:
@@ -763,9 +1012,7 @@ def test_head_transport_and_service_failures_are_wrapped(fake_s3: FakeS3Client) 
     fake_s3.raise_for["head_object"] = service_error("AccessDenied", "HeadObject")
     with pytest.raises(B2OperationError, match="head_object"):
         head_object_receipt(fake_s3, bucket="assets-test", key="asset", expected_sha256=DIGEST)
-    fake_s3.raise_for["head_object"] = EndpointConnectionError(
-        endpoint_url="https://test.invalid"
-    )
+    fake_s3.raise_for["head_object"] = EndpointConnectionError(endpoint_url="https://test.invalid")
     with pytest.raises(B2OperationError, match="head_object"):
         head_object_receipt(fake_s3, bucket="assets-test", key="asset", expected_sha256=DIGEST)
 
@@ -891,9 +1138,7 @@ def test_presign_delete_lock_and_retention_service_errors(fake_s3: FakeS3Client)
     with pytest.raises(B2RetentionError, match="get_object_lock_configuration"):
         verify_bucket_object_lock_enabled(fake_s3, bucket="vault-test")
     fake_s3.raise_for.clear()
-    fake_s3.raise_for["get_object_retention"] = service_error(
-        "AccessDenied", "GetObjectRetention"
-    )
+    fake_s3.raise_for["get_object_retention"] = service_error("AccessDenied", "GetObjectRetention")
     with pytest.raises(B2RetentionError, match="get_object_retention"):
         read_object_retention(fake_s3, bucket="vault-test", key="object")
 
