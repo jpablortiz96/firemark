@@ -14,6 +14,8 @@ from api.firemark.control_plane.service import (
 )
 from api.firemark.control_plane.supabase_repository import SupabaseCertificateRepository
 from api.firemark.generate_and_seal import GenerateAndSealService
+from api.firemark.generation.elevenlabs_provider import ElevenLabsAudioProvider
+from api.firemark.generation.gemini_provider import GeminiImageProvider
 from api.firemark.generation.openai_provider import OpenAIImageProvider
 from api.firemark.runtime import FiremarkRuntime, LazyDeliveryStorage
 from api.firemark.settings import Settings
@@ -60,16 +62,51 @@ def build_runtime(
             config = None
         if config is not None:
             overrides = dict(production_overrides or {})
+            openai_secret = (
+                config.openai_api_key.get_secret_value()
+                if config.openai_api_key is not None
+                else None
+            )
+            gemini_secret = (
+                config.gemini_api_key.get_secret_value()
+                if config.gemini_api_key is not None
+                else None
+            )
+            elevenlabs_secret = (
+                config.elevenlabs_api_key.get_secret_value()
+                if config.elevenlabs_api_key is not None
+                else None
+            )
+            openai_factory = (
+                None
+                if openai_secret is None
+                else lambda: OpenAIImageProvider(
+                    api_key=openai_secret,
+                    timeout_seconds=config.generation_timeout_seconds,
+                    max_image_bytes=config.max_generated_image_bytes,
+                )
+            )
+            gemini_factory = (
+                None
+                if gemini_secret is None
+                else lambda: GeminiImageProvider(
+                    api_key=gemini_secret,
+                    timeout_seconds=config.generation_timeout_seconds,
+                    max_image_bytes=config.max_generated_image_bytes,
+                )
+            )
+            audio_factory = (
+                None
+                if elevenlabs_secret is None
+                else lambda: ElevenLabsAudioProvider(
+                    api_key=elevenlabs_secret,
+                    timeout_seconds=config.generation_timeout_seconds,
+                    max_audio_bytes=config.max_generated_audio_bytes,
+                )
+            )
             generation_service = GenerateAndSealService(
                 certificate_service=certificate_service,
-                provider_factory=overrides.pop(
-                    "provider_factory",
-                    lambda: OpenAIImageProvider(
-                        api_key=config.openai_api_key.get_secret_value(),
-                        timeout_seconds=config.generation_timeout_seconds,
-                        max_image_bytes=config.max_generated_image_bytes,
-                    ),
-                ),
+                provider_factory=overrides.pop("provider_factory", openai_factory),
                 signer_factory=overrides.pop(
                     "signer_factory",
                     lambda: Ed25519Signer.from_private_key_base64(
@@ -90,7 +127,15 @@ def build_runtime(
                 default_model=config.openai_image_model,
                 default_size=config.openai_image_size,
                 max_generated_image_bytes=config.max_generated_image_bytes,
+                max_generated_audio_bytes=config.max_generated_audio_bytes,
                 generation_timeout_seconds=config.generation_timeout_seconds,
+                gemini_provider_factory=overrides.pop(
+                    "gemini_provider_factory", gemini_factory
+                ),
+                audio_provider_factory=overrides.pop("audio_provider_factory", audio_factory),
+                default_gemini_model=config.gemini_image_model,
+                default_audio_model=config.elevenlabs_model_id,
+                default_audio_voice_id=config.elevenlabs_voice_id,
                 **overrides,
             )
     return FiremarkRuntime(

@@ -76,7 +76,7 @@ export function VerificationResult({ result, presentedSha256 }: { result: Result
           </Link>
         )}
         {result.verified && presentedSha256 && (
-          <DeliveryButton certId={result.cert_id} presentedSha256={presentedSha256} />
+          <DeliveryButton certId={result.cert_id} presentedSha256={presentedSha256} mimeType={result.mime_type} />
         )}
       </div>
     </section>

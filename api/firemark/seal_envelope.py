@@ -92,9 +92,11 @@ class SealEnvelopeV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_trust_relationships(self) -> SealEnvelopeV1:
-        """Enforce distinct asset hashes and forward retention ordering."""
-        if self.source_sha256 == self.sealed_sha256:
-            raise ValueError("source_sha256 and sealed_sha256 must be different")
+        """Enforce forward retention ordering.
+
+        Byte-preserving formats such as FIREMARK audio intentionally bind the same source and
+        sealed digest. The issuance service still requires distinct hashes for embedded PNGs.
+        """
         if self.retention_until <= self.created_at:
             raise ValueError("retention_until must be later than created_at")
         return self

@@ -82,13 +82,13 @@ def test_digest_validation(field: str, digest: str) -> None:
         SealEnvelopeV1.model_validate(values)
 
 
-def test_source_and_sealed_digest_must_differ() -> None:
+def test_source_and_sealed_digest_may_match_for_byte_preserving_media() -> None:
     signer = Ed25519Signer.generate()
     values = envelope_values(signer)
     values["sealed_sha256"] = values["source_sha256"]
 
-    with pytest.raises(ValidationError, match="must be different"):
-        SealEnvelopeV1.model_validate(values)
+    envelope = SealEnvelopeV1.model_validate(values)
+    assert envelope.source_sha256 == envelope.sealed_sha256
 
 
 def test_schema_version_is_fixed() -> None:

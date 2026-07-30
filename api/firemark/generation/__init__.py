@@ -1,6 +1,27 @@
 """Generation provider contracts for FIREMARK Generate & Seal."""
 
-from api.firemark.generation.models import GeneratedImage, GenerationRequest
-from api.firemark.generation.provider import GenerationProvider
+from api.firemark.generation.models import (
+    AudioGenerationRequest,
+    GeneratedAudio,
+    GeneratedImage,
+    GeneratedMedia,
+    GenerationRequest,
+)
+from api.firemark.generation.provider import (
+    AudioGenerationProvider,
+    GenerationProvider,
+    GenerationProviderError,
+    ImageGenerationProvider,
+)
 
-__all__ = ["GeneratedImage", "GenerationProvider", "GenerationRequest"]
+__all__ = [
+    "AudioGenerationProvider",
+    "AudioGenerationRequest",
+    "GeneratedAudio",
+    "GeneratedImage",
+    "GeneratedMedia",
+    "GenerationProvider",
+    "GenerationProviderError",
+    "GenerationRequest",
+    "ImageGenerationProvider",
+]

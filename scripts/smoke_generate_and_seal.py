@@ -435,6 +435,8 @@ def run_live(report_path: Path, *, force: bool) -> int:
         load_dotenv(DEFAULT_ENV_FILE, override=False)
         settings = load_settings()
         config = settings.require_generate_and_seal_config()
+        if config.openai_api_key is None:
+            raise LiveSmokeError("OPENAI_NOT_CONFIGURED")
         live_supabase = settings.require_live_supabase_control_plane_config()
         tracker.begin("dependency_construction")
         print("NOTICE: one real OpenAI image generation may incur provider cost.")

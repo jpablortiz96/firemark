@@ -29,7 +29,7 @@ type VerifyFunction = (
   signal?: AbortSignal,
 ) => Promise<VerificationResult>;
 
-function layers(statuses: Partial<Record<keyof typeof LAYER_LABELS, LayerStatus>>): VerificationLayer[] {
+export function layers(statuses: Partial<Record<keyof typeof LAYER_LABELS, LayerStatus>>): VerificationLayer[] {
   return Object.entries(LAYER_LABELS).map(([key, label]) => ({
     key: key as keyof typeof LAYER_LABELS,
     label,
@@ -48,6 +48,8 @@ function localFailure(file: File, error: LensVerificationError): LensResult {
     state,
     fileName: file.name,
     fileSize: file.size,
+    mediaType: "image",
+    mimeType: "image/png",
     layers: layers({
       file_format: error.kind === "no_capsule" || error.kind === "malformed_capsule" ? "PASS" : "FAIL",
       public_capsule: error.kind === "no_capsule" || error.kind === "malformed_capsule" ? "FAIL" : "NOT CHECKED",
@@ -55,12 +57,15 @@ function localFailure(file: File, error: LensVerificationError): LensResult {
   };
 }
 
-function backendLayers(result: VerificationResult): VerificationLayer[] {
+export function backendLayers(
+  result: VerificationResult,
+  capsuleStatus: LayerStatus = "PASS",
+): VerificationLayer[] {
   const found = result.status !== "certificate_not_found";
   const statusChecked = !["certificate_not_found", "malformed_evidence"].includes(result.status);
   return layers({
     file_format: "PASS",
-    public_capsule: "PASS",
+    public_capsule: capsuleStatus,
     sealed_hash: result.hash_match === null ? "NOT CHECKED" : result.hash_match ? "PASS" : "FAIL",
     certificate_found: found ? "PASS" : "FAIL",
     signature: found ? (result.signature_valid ? "PASS" : "FAIL") : "NOT CHECKED",
@@ -78,7 +83,7 @@ function backendLayers(result: VerificationResult): VerificationLayer[] {
   });
 }
 
-function resultState(result: VerificationResult): LensResult["state"] {
+export function resultState(result: VerificationResult): LensResult["state"] {
   if (result.status === "verified") return "verified";
   if (result.status === "hash_mismatch") return "tampered";
   if (result.status === "certificate_revoked") return "revoked";
@@ -119,7 +124,7 @@ export async function verifyLocalPng(
       { cert_id: capsule.cert_id, presented_sha256: sealedSha256 },
       signal,
     );
-    if (verification.cert_id !== capsule.cert_id) {
+    if (verification.cert_id !== capsule.cert_id || verification.media_type !== "image") {
       throw new Error("VERIFICATION_CERTIFICATE_MISMATCH");
     }
     if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
@@ -128,6 +133,9 @@ export async function verifyLocalPng(
       state: resultState(verification),
       fileName: file.name,
       fileSize: file.size,
+      mediaType: "image",
+      mimeType: "image/png",
+      certId: capsule.cert_id,
       capsule,
       sealedSha256,
       verification,
@@ -143,6 +151,8 @@ export async function verifyLocalPng(
       state: "unavailable",
       fileName: file.name,
       fileSize: file.size,
+      mediaType: "image",
+      mimeType: "image/png",
       capsule,
       sealedSha256,
       layers: layers({

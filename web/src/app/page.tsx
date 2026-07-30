@@ -8,7 +8,7 @@ const capabilities = [
   {
     index: "01",
     title: "Generate & Seal",
-    description: "Create the media, preserve its private origin record, then seal the public bytes once.",
+    description: "Generate AI images with OpenAI or Gemini, or AI voice with ElevenLabs, then certify the bytes.",
     proof: "Source hash → provenance → sealed hash",
   },
   {
@@ -20,8 +20,8 @@ const capabilities = [
   {
     index: "03",
     title: "Verify Gate",
-    description: "Inspect a sealed PNG locally, then release only when every backend trust layer passes.",
-    proof: "Zero-upload Lens → verification → delivery",
+    description: "Inspect images or hash audio locally, then release only when every backend trust layer passes.",
+    proof: "Zero-upload media check → verification → delivery",
   },
 ] as const;
 
@@ -93,7 +93,7 @@ export default function HomePage() {
         <div>
           <span className="section-kicker">VERIFY GATE</span>
           <h2 id="gate-title">Delivery is a decision, not a link.</h2>
-          <p>FIREMARK Lens reads the PNG, extracts its public capsule, and calculates its sealed hash locally. Only the certificate ID and hash reach Verify Gate, where status, signature, custody references, and byte identity determine delivery.</p>
+          <p>FIREMARK Lens reads PNG capsules locally, while audio verification hashes MP3 bytes locally against an entered certificate ID. Only the certificate ID and hash reach Verify Gate, where status, signature, custody references, and byte identity determine delivery.</p>
           <Link className="text-link" href="/verify">Open FIREMARK Lens <span aria-hidden="true">→</span></Link>
         </div>
         <div className="gate-console" aria-hidden="true">
@@ -119,7 +119,7 @@ export default function HomePage() {
       <section className="final-cta">
         <span className="section-kicker">EVIDENCE BEFORE DELIVERY</span>
         <h2>Know exactly what you are about to trust.</h2>
-        <p>Drop a sealed PNG into FIREMARK Lens. The image never leaves your browser.</p>
+        <p>Verify a sealed image or AI voice recording locally. Your media never leaves the browser.</p>
         <Link className="button button-primary" href="/verify">Verify without uploading</Link>
       </section>
     </>

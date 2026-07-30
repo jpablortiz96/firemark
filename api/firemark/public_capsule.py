@@ -83,6 +83,57 @@ class FiremarkPublicCapsuleV1(BaseModel):
         return payload
 
 
+class FiremarkPublicAudioReferenceV1(BaseModel):
+    """Closed public audio reference stored with the certificate, never embedded in audio."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["firemark.public-audio-reference.v1"] = (
+        "firemark.public-audio-reference.v1"
+    )
+    cert_id: str
+    asset_id: str
+    run_id: str
+    canonical_hash: str
+    source_sha256: str
+    sealed_sha256: str
+    signer_key_id: str
+    verify_url: AnyHttpUrl
+    issued_at: datetime
+    embedded: Literal[False] = False
+    verification_method: Literal["cert_id+sha256"] = "cert_id+sha256"
+
+    @field_validator("issued_at")
+    @classmethod
+    def normalize_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Audio reference timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_validator("canonical_hash", "source_sha256", "sealed_sha256")
+    @classmethod
+    def validate_hash(cls, value: str) -> str:
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError("Audio reference hashes must be lowercase SHA-256 values")
+        return value
+
+    @field_validator("cert_id", "asset_id", "run_id", "signer_key_id")
+    @classmethod
+    def validate_identifier(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value):
+            raise ValueError("Audio reference identifiers must use safe characters")
+        return value
+
+    @field_validator("verify_url")
+    @classmethod
+    def validate_verify_url(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        if value.scheme != "https" or value.username or value.password:
+            raise ValueError("Audio reference URL must be credential-free HTTPS")
+        if value.query or value.fragment:
+            raise ValueError("Audio reference URL must not contain metadata")
+        return value
+
+
 def _chunks(png: bytes) -> list[tuple[int, bytes, bytes, int]]:
     if not png.startswith(PNG_MAGIC):
         raise PublicCapsuleError("Media is not a PNG")

@@ -33,6 +33,16 @@ export function canonicalPublicCertificate(certificate: PublicCertificate): stri
     cert_id: certificate.cert_id,
     asset_id: certificate.asset_id,
     run_id: certificate.run_id,
+    provider: certificate.provider,
+    model: certificate.model,
+    media_type: certificate.media_type,
+    mime_type: certificate.mime_type,
+    byte_size: certificate.byte_size,
+    ai_generated: certificate.ai_generated,
+    width: certificate.width,
+    height: certificate.height,
+    duration_ms: certificate.duration_ms,
+    source_sha256: certificate.source_sha256,
     sealed_sha256: certificate.sealed_sha256,
     canonical_hash: certificate.canonical_hash,
     signer_key_id: certificate.signer_key_id,
@@ -67,6 +77,13 @@ function validatePublicCertificate(certificate: PublicCertificate): void {
     !isCertificateId(certificate.cert_id) ||
     !isCertificateId(certificate.asset_id) ||
     !isCertificateId(certificate.run_id) ||
+    !certificate.provider.trim() ||
+    !certificate.model.trim() ||
+    !["image", "audio"].includes(certificate.media_type) ||
+    !certificate.mime_type.trim() ||
+    !Number.isInteger(certificate.byte_size) ||
+    certificate.byte_size <= 0 ||
+    !isSha256(certificate.source_sha256) ||
     !isSha256(certificate.sealed_sha256) ||
     !isSha256(certificate.canonical_hash) ||
     containsPrivatePublicField(certificate.public_manifest) ||
@@ -89,9 +106,16 @@ function verificationSummary(certificate: PublicCertificate): string {
     `Certificate ID: ${certificate.cert_id}`,
     `Asset ID: ${certificate.asset_id}`,
     `Run ID: ${certificate.run_id}`,
+    `Media type: ${certificate.media_type}`,
+    `MIME type: ${certificate.mime_type}`,
+    `Provider: ${certificate.provider}`,
+    `Model: ${certificate.model}`,
+    `AI generated: ${certificate.ai_generated}`,
+    `Byte size: ${certificate.byte_size}`,
     `Issued at: ${certificate.issued_at}`,
     `Certificate status: ${certificate.certificate_status}`,
     `Sealed SHA-256: ${certificate.sealed_sha256}`,
+    `Source SHA-256: ${certificate.source_sha256}`,
     `Canonical hash: ${certificate.canonical_hash}`,
     `Signer key ID: ${certificate.signer_key_id}`,
     `Public verification URL: ${certificate.verify_url}`,
@@ -111,6 +135,10 @@ function publicKey(certificate: PublicCertificate): string {
 }
 
 function readme(certificate: PublicCertificate): string {
+  const localStep =
+    certificate.media_type === "image"
+      ? "2. Drop the sealed PNG into FIREMARK Lens."
+      : "2. Select the audio locally and enter this certificate ID; only its SHA-256 is sent.";
   return [
     "FIREMARK Public Proof Pack",
     "",
@@ -119,7 +147,7 @@ function readme(certificate: PublicCertificate): string {
     "",
     "How to verify",
     `1. Open ${certificate.verify_url}`,
-    "2. Drop the sealed PNG into FIREMARK Lens.",
+    localStep,
     "3. Compare the displayed hash and certificate with this Proof Pack.",
     "4. Treat revoked or modified assets as unverified and do not deliver them.",
     "",

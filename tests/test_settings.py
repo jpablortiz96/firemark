@@ -406,3 +406,47 @@ def test_openai_only_configuration_requires_no_other_live_dependency() -> None:
     assert config.size == "1024x1024"
     assert config.timeout_seconds == 45
     assert config.max_image_bytes == 2 * 1024 * 1024
+
+
+def test_gemini_and_elevenlabs_settings_are_typed_secret_and_independent() -> None:
+    settings = Settings(
+        gemini_api_key="test-gemini-key",
+        gemini_image_model="gemini-image-test",
+        elevenlabs_api_key="test-eleven-key",
+        elevenlabs_voice_id="voice-test",
+        elevenlabs_model_id="eleven-model-test",
+        max_generated_audio_bytes=4 * 1024 * 1024,
+    )
+    gemini = settings.require_gemini_image_config()
+    audio = settings.require_elevenlabs_audio_config()
+    assert gemini.model == "gemini-image-test"
+    assert gemini.api_key.get_secret_value() == "test-gemini-key"
+    assert audio.voice_id == "voice-test" and audio.model_id == "eleven-model-test"
+    assert audio.max_audio_bytes == 4 * 1024 * 1024
+    assert "test-gemini-key" not in repr(gemini)
+    assert "test-eleven-key" not in repr(audio)
+
+
+def test_multimedia_settings_reject_partial_or_unsafe_provider_configuration() -> None:
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        Settings().require_gemini_image_config()
+    with pytest.raises(ValueError, match="ElevenLabs"):
+        Settings().require_elevenlabs_audio_config()
+    with pytest.raises(ValidationError, match="configured together"):
+        Settings(elevenlabs_api_key="partial")
+    with pytest.raises(ValidationError, match="VOICE_ID"):
+        Settings(elevenlabs_api_key="secret", elevenlabs_voice_id="unsafe voice")
+    with pytest.raises(ValidationError, match="between 1 and 100 MiB"):
+        Settings(max_generated_audio_bytes=101 * 1024 * 1024)
+
+
+def test_multimedia_environment_aliases_load_without_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setenv("GEMINI_IMAGE_MODEL", "gemini-image-test")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test-eleven-key")
+    monkeypatch.setenv("ELEVENLABS_VOICE_ID", "voice-test")
+    monkeypatch.setenv("ELEVENLABS_MODEL_ID", "eleven-model-test")
+    settings = load_settings()
+    assert settings.gemini_image_model == "gemini-image-test"
+    assert settings.elevenlabs_voice_id == "voice-test"
+    assert settings.elevenlabs_model_id == "eleven-model-test"

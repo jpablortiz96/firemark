@@ -29,6 +29,10 @@ from api.firemark.control_plane.repository import (
     DeliveryStorageError,
     RegistrationValidationError,
 )
+from api.firemark.public_capsule import (
+    FiremarkPublicAudioReferenceV1,
+    FiremarkPublicCapsuleV1,
+)
 from api.firemark.seal_envelope import (
     SealEnvelopeV1,
     SignedSealEnvelopeV1,
@@ -106,6 +110,16 @@ class CertificateService:
                 "cert_id": certificate.cert_id,
                 "asset_id": certificate.asset_id,
                 "run_id": certificate.run_id,
+                "provider": certificate.provider,
+                "model": certificate.model,
+                "media_type": certificate.media_type,
+                "mime_type": certificate.mime_type,
+                "byte_size": certificate.byte_size,
+                "ai_generated": certificate.ai_generated,
+                "width": certificate.width,
+                "height": certificate.height,
+                "duration_ms": certificate.duration_ms,
+                "source_sha256": certificate.source_sha256,
                 "sealed_sha256": certificate.sealed_sha256,
                 "canonical_hash": certificate.canonical_hash,
                 "signer_key_id": certificate.signer_key_id,
@@ -120,7 +134,43 @@ class CertificateService:
 
     def get_public_certificate(self, cert_id: str) -> PublicCertificate | None:
         certificate = self.repository.get_certificate(cert_id)
-        return self._public(certificate) if certificate is not None else None
+        if certificate is None or not self._public_media_projection_valid(certificate):
+            return None
+        return self._public(certificate)
+
+    @classmethod
+    def _public_media_projection_valid(cls, certificate: CertificateRecord) -> bool:
+        if cls._contains_private_generation_field(certificate.public_manifest):
+            return False
+        try:
+            schema = certificate.public_manifest.get("schema_version")
+            if certificate.media_type == "image" and schema == "firemark.public-capsule.v1":
+                projection = FiremarkPublicCapsuleV1.model_validate(certificate.public_manifest)
+                return (
+                    projection.cert_id == certificate.cert_id
+                    and projection.asset_id == certificate.asset_id
+                    and projection.run_id == certificate.run_id
+                    and projection.source_sha256 == certificate.source_sha256
+                    and projection.canonical_hash == certificate.canonical_hash
+                    and projection.signer_key_id == certificate.signer_key_id
+                )
+            if certificate.media_type == "audio":
+                projection_audio = FiremarkPublicAudioReferenceV1.model_validate(
+                    certificate.public_manifest
+                )
+                return (
+                    projection_audio.cert_id == certificate.cert_id
+                    and projection_audio.asset_id == certificate.asset_id
+                    and projection_audio.run_id == certificate.run_id
+                    and projection_audio.source_sha256 == certificate.source_sha256
+                    and projection_audio.sealed_sha256 == certificate.sealed_sha256
+                    and projection_audio.canonical_hash == certificate.canonical_hash
+                    and projection_audio.signer_key_id == certificate.signer_key_id
+                    and not projection_audio.embedded
+                )
+            return certificate.media_type == "image"
+        except ValueError:
+            return False
 
     def register_certificate(
         self,
@@ -153,6 +203,8 @@ class CertificateService:
             (asset_id == asset.asset_id, "asset_id mismatch"),
             (run_id == generation_run.run_id, "run_id mismatch"),
             (generation_run.run_id == asset.run_id == envelope.run_id, "run_id mismatch"),
+            (generation_run.provider.strip() != "", "provider missing"),
+            (generation_run.model.strip() != "", "model missing"),
             (custody.asset_id == asset.asset_id, "asset_id mismatch"),
             (
                 hmac.compare_digest(asset.source_sha256, envelope.source_sha256),
@@ -188,10 +240,48 @@ class CertificateService:
                 raise RegistrationValidationError(message)
         if self._contains_private_generation_field(public_manifest):
             raise RegistrationValidationError("Public manifest contains private generation fields")
+        try:
+            if asset.asset_type == "image" and public_manifest.get("schema_version") == (
+                "firemark.public-capsule.v1"
+            ):
+                projection = FiremarkPublicCapsuleV1.model_validate(public_manifest)
+                public_matches = (
+                    projection.cert_id == cert_id
+                    and projection.asset_id == asset_id
+                    and projection.run_id == run_id
+                    and projection.source_sha256 == asset.source_sha256
+                    and projection.canonical_hash == canonical_hash
+                )
+            elif asset.asset_type == "audio":
+                audio_projection = FiremarkPublicAudioReferenceV1.model_validate(public_manifest)
+                public_matches = (
+                    audio_projection.cert_id == cert_id
+                    and audio_projection.asset_id == asset_id
+                    and audio_projection.run_id == run_id
+                    and audio_projection.source_sha256 == asset.source_sha256
+                    and audio_projection.sealed_sha256 == asset.sealed_sha256
+                    and audio_projection.canonical_hash == canonical_hash
+                    and not audio_projection.embedded
+                )
+            else:
+                public_matches = True
+        except ValueError as exc:
+            raise RegistrationValidationError("Public media projection is malformed") from exc
+        if not public_matches:
+            raise RegistrationValidationError("Public media projection does not match evidence")
         certificate = CertificateRecord(
             cert_id=envelope.cert_id,
             asset_id=asset.asset_id,
             run_id=envelope.run_id,
+            provider=generation_run.provider,
+            model=generation_run.model,
+            media_type=asset.asset_type,
+            mime_type=asset.media_type,
+            byte_size=asset.byte_size,
+            ai_generated=generation_run.ai_generated,
+            width=asset.width,
+            height=asset.height,
+            duration_ms=asset.duration_ms,
             source_sha256=envelope.source_sha256,
             sealed_sha256=envelope.sealed_sha256,
             canonical_hash=envelope.canonical_hash,
@@ -248,8 +338,16 @@ class CertificateService:
         custody_valid = False
         reason = "CERTIFICATE_NOT_FOUND"
         event_cert_id: str | None = None
+        media_type = None
+        mime_type = None
+        provider = None
+        model = None
         if certificate is not None:
             event_cert_id = certificate.cert_id
+            media_type = certificate.media_type
+            mime_type = certificate.mime_type
+            provider = certificate.provider
+            model = certificate.model
             envelope = certificate.signed_envelope.envelope
             envelope_valid = (
                 envelope.cert_id == certificate.cert_id
@@ -259,6 +357,7 @@ class CertificateService:
                 and envelope.canonical_hash == certificate.canonical_hash
                 and envelope.signer_key_id == certificate.signer_key_id
                 and certificate.signature_b64 == certificate.signed_envelope.signature
+                and self._public_media_projection_valid(certificate)
             )
             signature_valid = envelope_valid and verify_signed_envelope(
                 certificate.signed_envelope, certificate.signer_public_key_b64
@@ -314,6 +413,10 @@ class CertificateService:
         return VerificationResult(
             verification_event_id=event_id,
             cert_id=request.cert_id,
+            media_type=media_type,
+            mime_type=mime_type,
+            provider=provider,
+            model=model,
             status=status,
             verified=status == "verified",
             signature_valid=signature_valid,

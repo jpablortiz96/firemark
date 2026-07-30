@@ -5,11 +5,17 @@ from __future__ import annotations
 import base64
 from datetime import UTC, datetime
 
-from api.firemark.generation.models import GeneratedImage, GenerationRequest
+from api.firemark.generation.models import (
+    AudioGenerationRequest,
+    GeneratedAudio,
+    GeneratedImage,
+    GenerationRequest,
+)
 
 _TINY_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+_TINY_MP3 = b"ID3\x04\x00\x00\x00\x00\x00\x00FIREMARK-LOCAL-AUDIO-FIXTURE"
 
 
 class FakeGenerationProvider:
@@ -28,5 +34,25 @@ class FakeGenerationProvider:
             provider_created_at=datetime(2026, 7, 30, tzinfo=UTC),
             safe_generation_metadata={"local_fixture": True, "production_evidence": False},
             seed=request.seed,
+            ai_generated=False,
+        )
+
+
+class FakeAudioProvider:
+    """Return deterministic non-production MP3-shaped bytes for tests."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_audio(self, request: AudioGenerationRequest) -> GeneratedAudio:
+        self.calls += 1
+        return GeneratedAudio(
+            data=_TINY_MP3,
+            provider="fake-elevenlabs",
+            model=request.model,
+            voice_id=request.voice_id,
+            provider_request_id=None,
+            provider_created_at=datetime(2026, 7, 30, tzinfo=UTC),
+            safe_generation_metadata={"local_fixture": True, "production_evidence": False},
             ai_generated=False,
         )

@@ -22,7 +22,7 @@ export function CertificateCard({ certificate }: { certificate: PublicCertificat
       <header className="certificate-header">
         <div>
           <div className="eyebrow"><span /> FIREMARK BIRTH CERTIFICATE</div>
-          <h1>Public proof for a sealed AI asset</h1>
+          <h1>Public proof for sealed AI {certificate.media_type === "audio" ? "audio" : "imagery"}</h1>
           <p>Issued {formatTimestamp(certificate.issued_at)} · UTC</p>
         </div>
         <StatusBadge status={status} />
@@ -44,11 +44,16 @@ export function CertificateCard({ certificate }: { certificate: PublicCertificat
         <Detail label="Asset ID" value={certificate.asset_id} />
         <Detail label="Run ID" value={certificate.run_id} />
         <Detail label="Signer key ID" value={certificate.signer_key_id} />
+        <Detail label="Provider" value={certificate.provider} />
+        <Detail label="Model" value={certificate.model} />
+        <Detail label="Media" value={`${certificate.media_type} · ${certificate.mime_type}`} />
+        <Detail label="Byte size" value={String(certificate.byte_size)} />
       </dl>
 
       <section className="hashes" aria-labelledby="hashes-title">
         <div className="section-kicker">BYTE IDENTITY</div>
         <h2 id="hashes-title">Cryptographic fingerprints</h2>
+        <HashDisplay label="Source SHA-256" value={certificate.source_sha256} />
         <HashDisplay label="Sealed SHA-256" value={certificate.sealed_sha256} />
         <HashDisplay label="Canonical hash" value={certificate.canonical_hash} />
       </section>
@@ -87,6 +92,9 @@ export function CertificateCard({ certificate }: { certificate: PublicCertificat
           Download Proof Pack
         </a>
         <span>Verification is independent of certificate display.</span>
+        {certificate.media_type === "audio" && (
+          <span>Audio playback becomes available only after hash verification and secure delivery.</span>
+        )}
       </div>
     </article>
   );

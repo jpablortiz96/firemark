@@ -39,11 +39,13 @@ def test_public_certificate_has_only_safe_fields_and_utc_time() -> None:
     assert isinstance(certificate, PublicCertificate)
     payload = certificate.model_dump(mode="json")
     assert set(payload) == {
-        "schema_version", "cert_id", "asset_id", "run_id", "sealed_sha256",
+            "schema_version", "cert_id", "asset_id", "run_id", "provider", "model",
+            "media_type", "mime_type", "byte_size", "ai_generated", "width", "height",
+            "duration_ms", "source_sha256", "sealed_sha256",
         "canonical_hash", "signer_key_id", "signer_public_key_b64", "signature_b64",
         "public_manifest", "certificate_status", "issued_at", "verify_url",
     }
-    assert not {"prompt_private", "parameters_private", "seed_private", "source_sha256"} & payload.keys()
+    assert not {"prompt_private", "parameters_private", "seed_private"} & payload.keys()
     assert certificate.issued_at.utcoffset().total_seconds() == 0
     with pytest.raises(ValidationError):
         PublicCertificate.model_validate({**payload, "issued_at": datetime(2026, 1, 1)})

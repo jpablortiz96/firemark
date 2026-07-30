@@ -13,6 +13,16 @@ export interface PublicCertificate {
   cert_id: string;
   asset_id: string;
   run_id: string;
+  provider: string;
+  model: string;
+  media_type: "image" | "audio";
+  mime_type: string;
+  byte_size: number;
+  ai_generated: boolean;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  source_sha256: string;
   sealed_sha256: string;
   canonical_hash: string;
   signer_key_id: string;
@@ -32,6 +42,10 @@ export interface VerificationRequest {
 export interface VerificationResult {
   verification_event_id: string;
   cert_id: string;
+  media_type: "image" | "audio" | null;
+  mime_type: string | null;
+  provider: string | null;
+  model: string | null;
   status: VerificationStatus;
   verified: boolean;
   signature_valid: boolean;

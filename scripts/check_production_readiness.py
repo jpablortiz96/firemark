@@ -31,11 +31,17 @@ BACKEND_FIELDS = (
     "FIREMARK_DELIVERY_TTL_SECONDS",
     "FIREMARK_GENERATION_TIMEOUT_SECONDS",
     "FIREMARK_MAX_GENERATED_IMAGE_BYTES",
+    "FIREMARK_MAX_GENERATED_AUDIO_BYTES",
     "FIREMARK_VAULT_RETENTION_DAYS",
     "FIREMARK_PRESIGNED_URL_TTL_SECONDS",
     "OPENAI_API_KEY",
     "OPENAI_IMAGE_MODEL",
     "OPENAI_IMAGE_SIZE",
+    "GEMINI_API_KEY",
+    "GEMINI_IMAGE_MODEL",
+    "ELEVENLABS_API_KEY",
+    "ELEVENLABS_VOICE_ID",
+    "ELEVENLABS_MODEL_ID",
     "SUPABASE_URL",
     "SUPABASE_PUBLISHABLE_KEY",
     "SUPABASE_SERVICE_ROLE_KEY",
@@ -149,6 +155,8 @@ def evaluate_readiness(
         "FIREMARK_ADMIN_API_KEY",
         "FIREMARK_DELIVERY_API_KEY",
         "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "ELEVENLABS_API_KEY",
         "B2_ASSETS_KEY_ID",
         "B2_ASSETS_APPLICATION_KEY",
         "B2_VAULT_KEY_ID",
@@ -189,6 +197,7 @@ def evaluate_readiness(
         "FIREMARK_DELIVERY_TTL_SECONDS": (60, 900),
         "FIREMARK_GENERATION_TIMEOUT_SECONDS": (5, 300),
         "FIREMARK_MAX_GENERATED_IMAGE_BYTES": (1024 * 1024, 50 * 1024 * 1024),
+        "FIREMARK_MAX_GENERATED_AUDIO_BYTES": (1024 * 1024, 100 * 1024 * 1024),
         "FIREMARK_VAULT_RETENTION_DAYS": (1, 3650),
         "FIREMARK_PRESIGNED_URL_TTL_SECONDS": (60, 900),
     }
@@ -197,6 +206,14 @@ def evaluate_readiness(
 
     model = _value(backend, "OPENAI_IMAGE_MODEL")
     _set(statuses, "BACKEND", "OPENAI_IMAGE_MODEL", bool(model and _MODEL_PATTERN.fullmatch(model)))
+    for name in ("GEMINI_IMAGE_MODEL", "ELEVENLABS_MODEL_ID", "ELEVENLABS_VOICE_ID"):
+        provider_value = _value(backend, name)
+        _set(
+            statuses,
+            "BACKEND",
+            name,
+            bool(provider_value and _MODEL_PATTERN.fullmatch(provider_value)),
+        )
     _set(
         statuses,
         "BACKEND",

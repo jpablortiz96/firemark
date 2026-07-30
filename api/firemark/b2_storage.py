@@ -381,10 +381,11 @@ def assets_source_key(sha256: str, extension: str) -> str:
     return f"assets/{digest[:2]}/{digest[2:4]}/{digest}.{suffix}"
 
 
-def sealed_asset_key(sha256: str) -> str:
-    """Build the deterministic private distributable PNG key."""
+def sealed_asset_key(sha256: str, extension: str = "png") -> str:
+    """Build the deterministic private distributable media key."""
     digest = _validate_digest(sha256)
-    return f"sealed/{digest[:2]}/{digest[2:4]}/{digest}.png"
+    suffix = normalize_extension(extension)
+    return f"sealed/{digest[:2]}/{digest[2:4]}/{digest}.{suffix}"
 
 
 def assets_manifest_key(run_id: str, canonical_hash: str) -> str:

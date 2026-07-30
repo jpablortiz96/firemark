@@ -50,6 +50,9 @@ export interface LensResult {
   layers: VerificationLayer[];
   fileName: string;
   fileSize: number;
+  mediaType?: "image" | "audio";
+  mimeType?: string;
+  certId?: string;
   capsule?: FiremarkPublicCapsuleV1;
   sealedSha256?: string;
   verification?: VerificationResult;

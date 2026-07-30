@@ -124,7 +124,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 /* Verify workspace */
 .verify-page, .certificate-page { min-height: 760px; padding: 4rem 1.5rem 7rem; }
 .page-intro { display: flex; justify-content: space-between; align-items: center; gap: 2rem; margin-bottom: 2.5rem; }.page-intro p { color: var(--muted); }
-.verify-mode-tabs { display: inline-grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); border-bottom: 0; background: #090b0a; }
+.verify-mode-tabs { display: inline-grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-bottom: 0; background: #090b0a; }
 .verify-mode-tabs button { min-height: 48px; padding: .75rem 1.2rem; border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
 .verify-mode-tabs button:last-child { border-right: 0; }.verify-mode-tabs button[aria-selected="true"] { background: var(--orange); color: #170803; font-weight: 750; }
 .verify-workspace { display: grid; grid-template-columns: .88fr 1.12fr; border: 1px solid var(--line); background: var(--graphite); min-height: 620px; }

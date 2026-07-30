@@ -9,7 +9,7 @@ export function Hero() {
           Every AI asset ships with a <em>Birth Certificate</em> — or it doesn&apos;t ship at all.
         </h1>
         <p className="hero-lede">
-          FIREMARK binds generated media to signed provenance, immutable custody, and a clear
+          FIREMARK binds AI images and AI voice to signed provenance, immutable custody, and a clear
           verification decision before a private byte is released.
         </p>
         <div className="hero-actions">
@@ -24,7 +24,7 @@ export function Hero() {
         <div className="asset-frame">
           <div className="asset-grid" />
           <div className="asset-orb" />
-          <div className="asset-label"><span>SEALED ASSET</span><strong>PNG / VERIFIED</strong></div>
+          <div className="asset-label"><span>SEALED MEDIA</span><strong>IMAGE + AUDIO</strong></div>
           <div className="hash-strip">9f2a ··· 7c81</div>
         </div>
         <div className="proof-line" aria-hidden="true"><span /><i /></div>

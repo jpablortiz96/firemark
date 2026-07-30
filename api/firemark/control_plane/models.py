@@ -13,6 +13,7 @@ from api.firemark.custody import B2CustodyReceipt
 from api.firemark.seal_envelope import SignedSealEnvelopeV1
 
 CertificateStatus = Literal["active", "revoked", "invalid"]
+AssetType = Literal["image", "audio"]
 VerificationStatus = Literal[
     "verified",
     "hash_mismatch",
@@ -62,6 +63,7 @@ class GenerationRunRecord(FrozenModel):
     run_id: str
     provider: str
     model: str
+    ai_generated: bool
     prompt_private: str
     parameters_private: dict[str, Any]
     seed_private: int | str | None = None
@@ -83,8 +85,13 @@ class AssetRecord(FrozenModel):
 
     asset_id: str
     run_id: str
+    asset_type: AssetType
     media_type: str
     file_extension: str
+    byte_size: int = Field(gt=0)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    duration_ms: int | None = Field(default=None, gt=0)
     source_sha256: str
     sealed_sha256: str
     assets_bucket: str
@@ -104,9 +111,15 @@ class AssetRecord(FrozenModel):
     _time = field_validator("created_at")(_utc)
 
     @model_validator(mode="after")
-    def require_distinct_hashes(self) -> AssetRecord:
-        if self.source_sha256 == self.sealed_sha256:
-            raise ValueError("source_sha256 and sealed_sha256 must be different")
+    def validate_media_relationships(self) -> AssetRecord:
+        if self.asset_type == "image" and self.source_sha256 == self.sealed_sha256:
+            raise ValueError("Image source_sha256 and sealed_sha256 must be different")
+        if self.asset_type == "image" and self.duration_ms is not None:
+            raise ValueError("Image assets cannot declare audio duration")
+        if self.asset_type == "audio" and (self.width is not None or self.height is not None):
+            raise ValueError("Audio assets cannot declare image dimensions")
+        if (self.width is None) != (self.height is None):
+            raise ValueError("Image width and height must be supplied together")
         return self
 
 
@@ -136,6 +149,15 @@ class CertificateRecord(FrozenModel):
     cert_id: str
     asset_id: str
     run_id: str
+    provider: str
+    model: str
+    media_type: AssetType
+    mime_type: str
+    byte_size: int = Field(gt=0)
+    ai_generated: bool
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    duration_ms: int | None = Field(default=None, gt=0)
     source_sha256: str
     sealed_sha256: str
     canonical_hash: str
@@ -155,6 +177,7 @@ class CertificateRecord(FrozenModel):
     _texts = field_validator("signer_key_id", "signer_public_key_b64", "signature_b64")(
         _nonblank
     )
+    _media_text = field_validator("provider", "model", "mime_type")(_nonblank)
     _hashes = field_validator("source_sha256", "sealed_sha256", "canonical_hash")(_digest)
     _issued = field_validator("issued_at")(_utc)
 
@@ -178,6 +201,16 @@ class PublicCertificate(FrozenModel):
     cert_id: str
     asset_id: str
     run_id: str
+    provider: str
+    model: str
+    media_type: AssetType
+    mime_type: str
+    byte_size: int = Field(gt=0)
+    ai_generated: bool
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    duration_ms: int | None = Field(default=None, gt=0)
+    source_sha256: str
     sealed_sha256: str
     canonical_hash: str
     signer_key_id: str
@@ -189,7 +222,8 @@ class PublicCertificate(FrozenModel):
     verify_url: AnyHttpUrl
 
     _ids = field_validator("cert_id", "asset_id", "run_id")(_identifier)
-    _hashes = field_validator("sealed_sha256", "canonical_hash")(_digest)
+    _hashes = field_validator("source_sha256", "sealed_sha256", "canonical_hash")(_digest)
+    _media_text = field_validator("provider", "model", "mime_type")(_nonblank)
     _time = field_validator("issued_at")(_utc)
 
 
@@ -210,6 +244,10 @@ class VerificationResult(FrozenModel):
 
     verification_event_id: UUID
     cert_id: str
+    media_type: AssetType | None = None
+    mime_type: str | None = None
+    provider: str | None = None
+    model: str | None = None
     status: VerificationStatus
     verified: bool
     signature_valid: bool

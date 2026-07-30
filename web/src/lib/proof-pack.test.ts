@@ -18,7 +18,7 @@ describe("public Proof Pack", () => {
   it("writes a canonical sorted-key public certificate projection", () => {
     const certificate = strFromU8(entries()["certificate.json"]);
     expect(certificate).toBe(canonicalPublicCertificate(certificateFixture));
-    expect(certificate.startsWith('{"asset_id"')).toBe(true);
+    expect(certificate.startsWith('{"ai_generated"')).toBe(true);
     expect(JSON.parse(certificate)).toEqual(
       expect.objectContaining({
         cert_id: certificateFixture.cert_id,
@@ -39,6 +39,27 @@ describe("public Proof Pack", () => {
     expect(publicKey).toContain(certificateFixture.signer_public_key_b64);
     expect(readme).toContain(certificateFixture.verify_url);
     expect(readme).toContain("Drop the sealed PNG into FIREMARK Lens");
+  });
+
+  it("describes detached hash verification for audio without adding private entries", () => {
+    const audio = {
+      ...certificateFixture,
+      media_type: "audio" as const,
+      mime_type: "audio/mpeg",
+      provider: "elevenlabs",
+      model: "eleven_multilingual_v2",
+      width: null,
+      height: null,
+      duration_ms: 1200,
+      public_manifest: {
+        schema_version: "firemark.public-audio-reference.v1",
+        embedded: false,
+      },
+    };
+    const files = unzipSync(buildProofPack(audio).bytes);
+    expect(Object.keys(files).sort()).toEqual([...PROOF_PACK_ENTRIES].sort());
+    expect(strFromU8(files["README.txt"])).toContain("only its SHA-256 is sent");
+    expect(strFromU8(files["verification-summary.txt"])).toContain("Media type: audio");
   });
 
   it("generates a local valid SVG QR without making a fetch request", () => {

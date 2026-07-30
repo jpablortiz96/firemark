@@ -30,12 +30,16 @@ FIREMARK public capsule in supported media, signs a FIREMARK Seal Envelope with 
 retains original evidence in immutable object storage. Public verification connects those records
 without exposing private evidence or credentials.
 
-`source_sha256` and `sealed_sha256` are deliberately distinct and must never be treated as
-interchangeable:
+`source_sha256` and `sealed_sha256` retain distinct roles and must never be treated as
+interchangeable labels:
 
 - `source_sha256` identifies the generated provider output before media embedding.
-- `sealed_sha256` identifies the final distributed file after the FIREMARK public capsule has been
-  embedded.
+- `sealed_sha256` identifies the final distributed file after the media-specific sealing strategy.
+
+For PNG images those values must differ because capsule embedding changes the container. MP3 audio
+uses an explicitly byte-preserving sealing strategy, so both roles intentionally contain the same
+digest. Audio is verified by `cert_id` plus the locally calculated hash; FIREMARK does not claim an
+embedded audio capsule.
 
 The local Trust Kernel signs the complete canonical FIREMARK Seal Envelope with Ed25519. A valid
 signature proves that the envelope bytes have not changed since a holder of the corresponding
@@ -51,7 +55,7 @@ with `sealed_sha256`.
 ## Repository status
 
 The repository contains the local Trust Kernel, Genblaze provenance integration, B2 Custody
-Kernel, Control Plane, and production Generate & Seal path for PNG images. The live B2 checkpoint
+Kernel, Control Plane, and production Generate & Seal path for PNG images and MP3 audio. The live B2 checkpoint
 has proved COMPLIANCE retention and the live Supabase checkpoint has proved RLS, atomic
 registration, public projection, events, and revocation. Generate & Seal now wires the official
 OpenAI SDK, private canonical provenance, capsule embedding, custody, sealed storage, signing,
@@ -81,13 +85,13 @@ The HTTP surface is intentionally small:
 | `GET` | `/healthz` | Local process health; external dependencies are not contacted. |
 | `GET` | `/v1/certificates/{cert_id}` | Redacted public Birth Certificate. |
 | `POST` | `/v1/verify` | Signature, envelope, custody-reference, status, and optional hash verification. |
-| `POST` | `/v1/generate-and-seal` | Admin-authenticated, idempotent PNG generation and sealing. |
+| `POST` | `/v1/generate-and-seal` | Admin-authenticated, idempotent image or audio generation and sealing. |
 | `POST` | `/v1/delivery/{cert_id}` | Delivery-authenticated Verify Gate requiring the exact `sealed_sha256`. |
 
-The public certificate includes public identifiers, `sealed_sha256`, `canonical_hash`, signer
-material, status, issuance time, verification URL, and the redacted capsule projection (which binds
-`source_sha256`). Prompts, parameters, seeds, storage locations, VersionIds, and custody receipt
-internals remain on the private service-role path.
+The public certificate includes public identifiers, provider/model, categorical and MIME media
+types, byte size, safe dimensions/duration, both asset hashes, `canonical_hash`, signer material,
+status, issuance time, verification URL, and a redacted media projection. Prompts, parameters,
+seeds, storage locations, VersionIds, and custody receipt internals remain private.
 
 The Verify Gate records verification before making a delivery decision. It asks the injected B2
 delivery adapter to confirm the recorded exact VersionId and then issue a short-lived private
@@ -99,28 +103,30 @@ The migration at `supabase/migrations/20260729000100_firemark_control_plane.sql`
 tables. Anonymous and authenticated roles receive no direct table access. A safe public certificate
 RPC exposes an allowlist, while a service-role-only PostgreSQL RPC atomically and idempotently
 registers the run, asset, custody record, and certificate.
+`20260730000100_firemark_multimedia.sql` adds public-safe multimedia facts, conditional image hash
+constraints, and the expanded atomic/public projections without exposing private evidence.
 
 ## Generate & Seal architecture
 
 `api.firemark.bootstrap.build_runtime()` is the explicit production composition root. Repository
 selection is controlled by `FIREMARK_REPOSITORY_BACKEND`; `memory` remains available for ordinary
 tests and `supabase` selects the lazy service-role adapter. Application construction performs no
-network request. OpenAI, B2, signing, and delivery dependencies are constructed only when their
+network request. Provider, B2, signing, and delivery dependencies are constructed only when their
 operation is requested, and each boundary remains injectable.
 
 `POST /v1/generate-and-seal` requires `Authorization: Bearer <FIREMARK_ADMIN_API_KEY>` and a safe
 `Idempotency-Key`. The request follows this order:
 
-1. Generate one PNG through the injected provider and hash the untouched bytes as
+1. Generate one PNG through OpenAI/Gemini or one MP3 through ElevenLabs and hash the untouched bytes as
    `source_sha256`.
 2. Build and verify the complete private canonical Genblaze Manifest and obtain its
    `canonical_hash`.
-3. Embed `FiremarkPublicCapsuleV1` into a deterministic PNG `tEXt` chunk and hash the resulting
-   distributable bytes as `sealed_sha256`.
+3. For PNG, embed `FiremarkPublicCapsuleV1` into a deterministic `tEXt` chunk. For MP3, create a
+   closed `FiremarkPublicAudioReferenceV1` without changing or pretending to embed audio bytes.
 4. Retain the raw source and full Manifest in the B2 vault under COMPLIANCE retention, verifying
    bytes and exact VersionIds.
-5. Upload and re-download the sealed PNG at
-   `sealed/{sha256[0:2]}/{sha256[2:4]}/{sha256}.png` using allowlisted metadata only.
+5. Upload and re-download sealed media at a content-addressed `.png` or `.mp3` key using
+   allowlisted metadata only.
 6. Construct and sign `SealEnvelopeV1`, then atomically register the complete certificate bundle
    in Supabase. No successful API response is returned before verified custody and registration.
 
@@ -145,6 +151,11 @@ non-redirecting download. Authentication, rate-limit, invalid-request, safety, t
 unavailable, and malformed-response failures become safe normalized codes. Provider bytes,
 response bodies, URLs, and credentials are never logged or persisted. The deterministic fake
 provider is test-only, reports `ai_generated=false`, and cannot silently run in production.
+
+Gemini and ElevenLabs use bounded, non-redirecting HTTPS adapters against their documented REST
+endpoints. Gemini accepts exactly one inline PNG. ElevenLabs requests `mp3_44100_128` and accepts
+only bounded `audio/mpeg` bytes. Their errors use the same safe normalized categories; credentials,
+prompts/text, response bodies, and URLs are excluded from logs and public records.
 
 Generation and delivery use distinct `SecretStr` bearer credentials and constant-time comparison.
 Missing or invalid bearer credentials return 401; public health, Birth Certificate, and Verify
@@ -187,6 +198,11 @@ presence, Ed25519 signature, certificate status, B2 custody reference, and deliv
 Local parsing never claims to prove remote custody; the final decision comes from Verify Gate.
 Missing or malformed capsules stop before any API call, while modified, revoked, and unregistered
 assets remain blocked.
+
+The audio mode accepts bounded MP3 files, validates and hashes them locally, and requires the user
+to supply the public `cert_id`. It transmits only `{cert_id, presented_sha256}` and marks the
+embedded-capsule layer `NOT CHECKED`. After a successful Verify Gate decision, the short-lived
+delivery URL may feed an in-memory browser audio player and is never persisted.
 
 An active Birth Certificate offers `Download Proof Pack`. Its server-side route fetches only the
 public certificate projection and creates an in-memory ZIP containing `certificate.json`, a text
@@ -330,8 +346,14 @@ FIREMARK_SIGNING_PUBLIC_KEY_B64=
 OPENAI_API_KEY=
 OPENAI_IMAGE_MODEL=
 OPENAI_IMAGE_SIZE=
+GEMINI_API_KEY=
+GEMINI_IMAGE_MODEL=
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=
+ELEVENLABS_MODEL_ID=
 FIREMARK_GENERATION_TIMEOUT_SECONDS=
 FIREMARK_MAX_GENERATED_IMAGE_BYTES=
+FIREMARK_MAX_GENERATED_AUDIO_BYTES=
 FIREMARK_ALLOWED_ORIGINS=
 ```
 

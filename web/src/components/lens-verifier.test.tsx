@@ -57,7 +57,8 @@ describe("FIREMARK Lens interaction", () => {
     const user = userEvent.setup();
     render(<VerifyExperience />);
     expect(screen.getByRole("heading", { name: "Verify an AI asset without uploading it." })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Verify by file" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Image Lens" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Audio hash" })).toHaveAttribute("aria-selected", "false");
     await user.click(screen.getByRole("tab", { name: "Verify by certificate ID" }));
     expect(screen.getByLabelText(/Certificate ID/)).toBeInTheDocument();
   });

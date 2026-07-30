@@ -125,11 +125,17 @@ class GenerateAndSealConfig(BaseModel):
     delivery_api_key: SecretStr
     signing_private_key_b64: SecretStr
     signing_public_key_b64: str
-    openai_api_key: SecretStr
+    openai_api_key: SecretStr | None
     openai_image_model: str
     openai_image_size: str
+    gemini_api_key: SecretStr | None
+    gemini_image_model: str
+    elevenlabs_api_key: SecretStr | None
+    elevenlabs_voice_id: str | None
+    elevenlabs_model_id: str
     generation_timeout_seconds: int
     max_generated_image_bytes: int
+    max_generated_audio_bytes: int
     public_base_url: str
     b2: CompleteB2Config
     supabase: SupabaseConfig
@@ -145,6 +151,29 @@ class OpenAIImageConfig(BaseModel):
     size: str
     timeout_seconds: int
     max_image_bytes: int
+
+
+class GeminiImageConfig(BaseModel):
+    """Gemini-only image generation configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    api_key: SecretStr
+    model: str
+    timeout_seconds: int
+    max_image_bytes: int
+
+
+class ElevenLabsAudioConfig(BaseModel):
+    """ElevenLabs-only MP3 text-to-speech configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    api_key: SecretStr
+    voice_id: str
+    model_id: str
+    timeout_seconds: int
+    max_audio_bytes: int
 
 
 class Settings(BaseModel):
@@ -183,8 +212,13 @@ class Settings(BaseModel):
     openai_api_key: SecretStr | None = None
     openai_image_model: str = "gpt-image-1.5"
     openai_image_size: str = "1024x1024"
+    gemini_api_key: SecretStr | None = None
+    gemini_image_model: str = "gemini-3.1-flash-image"
+    elevenlabs_voice_id: str | None = None
+    elevenlabs_model_id: str = "eleven_multilingual_v2"
     generation_timeout_seconds: int = 120
     max_generated_image_bytes: int = 20 * 1024 * 1024
+    max_generated_audio_bytes: int = 50 * 1024 * 1024
     gmi_api_key: SecretStr | None = None
     elevenlabs_api_key: SecretStr | None = None
     replicate_api_token: SecretStr | None = None
@@ -369,19 +403,46 @@ class Settings(BaseModel):
             raise ValueError("FIREMARK_MAX_GENERATED_IMAGE_BYTES must be between 1 and 50 MiB")
         return parsed
 
-    @field_validator("openai_image_model")
+    @field_validator("max_generated_audio_bytes", mode="before")
+    @classmethod
+    def validate_generated_audio_limit(cls, value: object) -> object:
+        """Bound generated audio memory use to 1 through 100 MiB."""
+        if isinstance(value, bool):
+            raise ValueError("FIREMARK_MAX_GENERATED_AUDIO_BYTES must be between 1 and 100 MiB")
+        try:
+            parsed = int(value) if isinstance(value, (int, str)) else -1
+        except ValueError as exc:
+            raise ValueError(
+                "FIREMARK_MAX_GENERATED_AUDIO_BYTES must be between 1 and 100 MiB"
+            ) from exc
+        if not 1024 * 1024 <= parsed <= 100 * 1024 * 1024:
+            raise ValueError("FIREMARK_MAX_GENERATED_AUDIO_BYTES must be between 1 and 100 MiB")
+        return parsed
+
+    @field_validator(
+        "openai_image_model", "gemini_image_model", "elevenlabs_model_id"
+    )
     @classmethod
     def validate_image_model(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", normalized):
-            raise ValueError("OPENAI_IMAGE_MODEL must be a safe nonblank model identifier")
+            raise ValueError("OPENAI_IMAGE_MODEL or provider model must be a safe identifier")
         return normalized
+
+    @field_validator("elevenlabs_voice_id")
+    @classmethod
+    def validate_voice_id(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value):
+            raise ValueError("ELEVENLABS_VOICE_ID must be a safe nonblank identifier")
+        return value
 
     @field_validator(
         "admin_api_key",
         "delivery_api_key",
         "signing_private_key_b64",
         "openai_api_key",
+        "gemini_api_key",
+        "elevenlabs_api_key",
     )
     @classmethod
     def validate_private_value(cls, value: SecretStr | None) -> SecretStr | None:
@@ -449,6 +510,8 @@ class Settings(BaseModel):
                 )
             except ValueError as exc:
                 raise ValueError("FIREMARK signing key material is invalid or mismatched") from exc
+        if (self.elevenlabs_api_key is None) != (self.elevenlabs_voice_id is None):
+            raise ValueError("ElevenLabs API key and voice ID must be configured together")
         if (
             self.admin_api_key is not None
             and self.delivery_api_key is not None
@@ -579,7 +642,6 @@ class Settings(BaseModel):
             self.admin_api_key,
             self.delivery_api_key,
             self.signing_private_key_b64,
-            self.openai_api_key,
             self.public_base_url,
         )
         if any(value is None for value in required):
@@ -587,8 +649,13 @@ class Settings(BaseModel):
         assert self.admin_api_key is not None
         assert self.delivery_api_key is not None
         assert self.signing_private_key_b64 is not None
-        assert self.openai_api_key is not None
         assert self.public_base_url is not None
+        if (
+            self.openai_api_key is None
+            and self.gemini_api_key is None
+            and self.elevenlabs_api_key is None
+        ):
+            raise ValueError("At least one production media provider is required")
         from api.firemark.signer import Ed25519Signer
 
         signer = Ed25519Signer.from_private_key_base64(
@@ -603,8 +670,14 @@ class Settings(BaseModel):
             openai_api_key=self.openai_api_key,
             openai_image_model=self.openai_image_model,
             openai_image_size=self.openai_image_size,
+            gemini_api_key=self.gemini_api_key,
+            gemini_image_model=self.gemini_image_model,
+            elevenlabs_api_key=self.elevenlabs_api_key,
+            elevenlabs_voice_id=self.elevenlabs_voice_id,
+            elevenlabs_model_id=self.elevenlabs_model_id,
             generation_timeout_seconds=self.generation_timeout_seconds,
             max_generated_image_bytes=self.max_generated_image_bytes,
+            max_generated_audio_bytes=self.max_generated_audio_bytes,
             public_base_url=self.public_base_url,
             b2=self.require_complete_b2_config(),
             supabase=self.require_supabase_config(),
@@ -620,6 +693,29 @@ class Settings(BaseModel):
             size=self.openai_image_size,
             timeout_seconds=self.generation_timeout_seconds,
             max_image_bytes=self.max_generated_image_bytes,
+        )
+
+    def require_gemini_image_config(self) -> GeminiImageConfig:
+        """Require only the settings needed for one Gemini image request."""
+        if self.gemini_api_key is None:
+            raise ValueError("GEMINI_API_KEY is required")
+        return GeminiImageConfig(
+            api_key=self.gemini_api_key,
+            model=self.gemini_image_model,
+            timeout_seconds=self.generation_timeout_seconds,
+            max_image_bytes=self.max_generated_image_bytes,
+        )
+
+    def require_elevenlabs_audio_config(self) -> ElevenLabsAudioConfig:
+        """Require only the settings needed for one ElevenLabs speech request."""
+        if self.elevenlabs_api_key is None or self.elevenlabs_voice_id is None:
+            raise ValueError("Complete ElevenLabs configuration is required")
+        return ElevenLabsAudioConfig(
+            api_key=self.elevenlabs_api_key,
+            voice_id=self.elevenlabs_voice_id,
+            model_id=self.elevenlabs_model_id,
+            timeout_seconds=self.generation_timeout_seconds,
+            max_audio_bytes=self.max_generated_audio_bytes,
         )
 
 
@@ -653,8 +749,13 @@ _ENVIRONMENT_FIELDS = {
     "OPENAI_API_KEY": "openai_api_key",
     "OPENAI_IMAGE_MODEL": "openai_image_model",
     "OPENAI_IMAGE_SIZE": "openai_image_size",
+    "GEMINI_API_KEY": "gemini_api_key",
+    "GEMINI_IMAGE_MODEL": "gemini_image_model",
+    "ELEVENLABS_VOICE_ID": "elevenlabs_voice_id",
+    "ELEVENLABS_MODEL_ID": "elevenlabs_model_id",
     "FIREMARK_GENERATION_TIMEOUT_SECONDS": "generation_timeout_seconds",
     "FIREMARK_MAX_GENERATED_IMAGE_BYTES": "max_generated_image_bytes",
+    "FIREMARK_MAX_GENERATED_AUDIO_BYTES": "max_generated_audio_bytes",
     "GMI_API_KEY": "gmi_api_key",
     "ELEVENLABS_API_KEY": "elevenlabs_api_key",
     "REPLICATE_API_TOKEN": "replicate_api_token",

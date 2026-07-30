@@ -9,6 +9,7 @@ from api.firemark.control_plane.memory_repository import MemoryCertificateReposi
 from api.firemark.control_plane.models import AssetRecord, CustodyRecord, GenerationRunRecord
 from api.firemark.control_plane.service import CertificateService
 from api.firemark.custody import B2CustodyReceipt, LockedObjectReceipt, StoredObjectReceipt
+from api.firemark.public_capsule import FiremarkPublicCapsuleV1
 from api.firemark.seal_envelope import SealEnvelopeV1, sign_envelope
 from api.firemark.signer import Ed25519Signer
 
@@ -82,6 +83,7 @@ def build_evidence() -> Evidence:
         run_id="firemark-run-1",
         provider="private-provider",
         model="private-model",
+        ai_generated=True,
         prompt_private="private prompt",
         parameters_private={"private": True},
         seed_private=42,
@@ -93,8 +95,10 @@ def build_evidence() -> Evidence:
     asset = AssetRecord(
         asset_id="firemark-asset-1",
         run_id=generation.run_id,
+        asset_type="image",
         media_type="image/png",
         file_extension="png",
+        byte_size=100,
         source_sha256=SOURCE,
         sealed_sha256=SEALED,
         assets_bucket="assets-bucket",
@@ -140,7 +144,16 @@ def build_evidence() -> Evidence:
         envelope=envelope,
         signature_b64=signed.signature,
         signer_public_key_b64=signer.export_public_key_base64(),
-        public_manifest={"schema_version": "1.0", "canonical_hash": CANONICAL},
+        public_manifest=FiremarkPublicCapsuleV1(
+            cert_id=envelope.cert_id,
+            asset_id=asset.asset_id,
+            run_id=generation.run_id,
+            canonical_hash=CANONICAL,
+            source_sha256=SOURCE,
+            signer_key_id=signer.signer_key_id,
+            verify_url=f"https://certs.firemark.test/v1/certificates/{envelope.cert_id}",
+            issued_at=NOW,
+        ).model_dump(mode="json"),
     )
 
 

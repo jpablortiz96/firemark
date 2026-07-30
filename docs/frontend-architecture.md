@@ -20,7 +20,7 @@ The browser may receive:
 - the redacted `PublicCertificate` projection;
 - a `VerificationResult` containing safe status fields;
 - a short-lived delivery URL, but only in one successful delivery response.
-- user-selected PNG bytes held transiently in local component execution;
+- user-selected PNG or MP3 bytes held transiently in local component execution;
 - the extracted closed public capsule and locally calculated sealed SHA-256.
 
 The browser must never receive:
@@ -107,7 +107,8 @@ a presented sealed SHA-256.
 
 ## FIREMARK Lens
 
-`/verify` offers two modes, with file verification first and certificate-ID verification retained.
+`/verify` offers three modes: local PNG Lens, local MP3 hash verification, and certificate-ID
+verification.
 Lens accepts only an `image/png` file with a `.png` extension and a maximum size of 25 MiB. Its
 dedicated parser validates PNG magic, bounded chunk lengths, per-chunk CRC, one terminal IEND, the
 reserved `firemark.public-capsule` key, `tEXt` encoding, the 8 KiB capsule limit, duplicate entries,
@@ -124,6 +125,12 @@ The result separates eight layers: local format and capsule checks; file-hash ag
 certificate presence; Ed25519 signature; certificate status; B2 custody reference; and delivery
 eligibility. B2 and delivery layers are never inferred from browser parsing and are populated only
 from `POST /v1/verify`.
+
+Audio verification accepts a bounded `audio/mpeg` `.mp3`, requires an explicit public certificate
+ID, validates MP3 magic, and hashes the bytes through the same Web Crypto/Worker boundary. It sends
+only `{cert_id, presented_sha256}`. The embedded-capsule layer is explicitly `NOT CHECKED` because
+FIREMARK neither alters MP3 bytes nor claims a nonexistent embedded capsule. Successful secure
+delivery may be played from the short-lived URL held only in component memory.
 
 Demo fixtures cover one valid sealed PNG, a one-byte-modified structurally valid PNG, and a PNG
 without a capsule. They exist only in tests and never provide a control that alters a user's file.

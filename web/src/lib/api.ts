@@ -85,6 +85,18 @@ function parseCertificate(value: unknown): PublicCertificate {
     !isCertificateId(String(body.cert_id ?? "")) ||
     !isCertificateId(String(body.asset_id ?? "")) ||
     !isCertificateId(String(body.run_id ?? "")) ||
+    typeof body.provider !== "string" ||
+    typeof body.model !== "string" ||
+    !["image", "audio"].includes(String(body.media_type)) ||
+    typeof body.mime_type !== "string" ||
+    typeof body.byte_size !== "number" ||
+    body.byte_size <= 0 ||
+    typeof body.ai_generated !== "boolean" ||
+    (body.width !== null && (typeof body.width !== "number" || body.width <= 0)) ||
+    (body.height !== null && (typeof body.height !== "number" || body.height <= 0)) ||
+    (body.duration_ms !== null &&
+      (typeof body.duration_ms !== "number" || body.duration_ms <= 0)) ||
+    !isSha256(String(body.source_sha256 ?? "")) ||
     !isSha256(String(body.sealed_sha256 ?? "")) ||
     !isSha256(String(body.canonical_hash ?? "")) ||
     typeof body.signer_key_id !== "string" ||
@@ -103,6 +115,16 @@ function parseCertificate(value: unknown): PublicCertificate {
     cert_id: String(body.cert_id),
     asset_id: String(body.asset_id),
     run_id: String(body.run_id),
+    provider: body.provider,
+    model: body.model,
+    media_type: body.media_type as PublicCertificate["media_type"],
+    mime_type: body.mime_type,
+    byte_size: body.byte_size,
+    ai_generated: body.ai_generated,
+    width: body.width as number | null,
+    height: body.height as number | null,
+    duration_ms: body.duration_ms as number | null,
+    source_sha256: String(body.source_sha256),
     sealed_sha256: String(body.sealed_sha256),
     canonical_hash: String(body.canonical_hash),
     signer_key_id: body.signer_key_id,
@@ -121,6 +143,10 @@ function parseVerification(value: unknown): VerificationResult {
     !body ||
     !isCertificateId(String(body.cert_id ?? "")) ||
     typeof body.verification_event_id !== "string" ||
+    (body.media_type !== null && !["image", "audio"].includes(String(body.media_type))) ||
+    (body.mime_type !== null && typeof body.mime_type !== "string") ||
+    (body.provider !== null && typeof body.provider !== "string") ||
+    (body.model !== null && typeof body.model !== "string") ||
     !VERIFICATION_STATUSES.has(String(body.status)) ||
     typeof body.verified !== "boolean" ||
     typeof body.signature_valid !== "boolean" ||

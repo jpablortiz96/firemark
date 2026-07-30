@@ -45,7 +45,7 @@ def generate_and_seal(
     except IdempotencyConflictError as exc:
         raise APIError(409, exc.code, "Idempotency key conflicts with a prior request.") from exc
     except GenerationProviderError as exc:
-        raise APIError(502, f"PROVIDER_{exc.code.upper()}", "Image generation failed.") from exc
+        raise APIError(502, f"PROVIDER_{exc.code.upper()}", "Media generation failed.") from exc
     except GenerateAndSealError as exc:
         if exc.code == "INVALID_IDEMPOTENCY_KEY":
             raise APIError(422, exc.code, "Idempotency key is invalid.") from exc

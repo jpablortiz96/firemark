@@ -52,7 +52,7 @@ def create_app(
     app = FastAPI(
         title="FIREMARK Control Plane",
         version="0.1.0",
-        description="Public Birth Certificates and verification-gated delivery.",
+        description="Multimedia Birth Certificates and verification-gated delivery.",
     )
     app.add_middleware(
         CORSMiddleware,

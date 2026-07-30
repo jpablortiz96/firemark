@@ -43,4 +43,24 @@ describe("public Birth Certificate", () => {
     expect(screen.getByText("Invalid")).toBeInTheDocument();
     expect(screen.getByText("Certificate needs review")).toBeInTheDocument();
   });
+
+  it("renders audio provider context without pre-authorizing playback", () => {
+    render(
+      <CertificateCard
+        certificate={{
+          ...certificateFixture,
+          media_type: "audio",
+          mime_type: "audio/mpeg",
+          provider: "elevenlabs",
+          model: "eleven_multilingual_v2",
+          width: null,
+          height: null,
+          duration_ms: 1000,
+        }}
+      />,
+    );
+    expect(screen.getByText("elevenlabs")).toBeInTheDocument();
+    expect(screen.getByText(/Audio playback becomes available/)).toBeInTheDocument();
+    expect(screen.queryByRole("audio")).not.toBeInTheDocument();
+  });
 });

@@ -19,11 +19,17 @@ def _valid_environment() -> dict[str, str]:
         "FIREMARK_DELIVERY_TTL_SECONDS": "300",
         "FIREMARK_GENERATION_TIMEOUT_SECONDS": "120",
         "FIREMARK_MAX_GENERATED_IMAGE_BYTES": "20971520",
+        "FIREMARK_MAX_GENERATED_AUDIO_BYTES": "52428800",
         "FIREMARK_VAULT_RETENTION_DAYS": "90",
         "FIREMARK_PRESIGNED_URL_TTL_SECONDS": "300",
         "OPENAI_API_KEY": "openai-test-value",
         "OPENAI_IMAGE_MODEL": "gpt-image-1.5",
         "OPENAI_IMAGE_SIZE": "1024x1024",
+        "GEMINI_API_KEY": "gemini-test-value",
+        "GEMINI_IMAGE_MODEL": "gemini-3.1-flash-image",
+        "ELEVENLABS_API_KEY": "eleven-test-value",
+        "ELEVENLABS_VOICE_ID": "voice-test",
+        "ELEVENLABS_MODEL_ID": "eleven_multilingual_v2",
         "SUPABASE_URL": "https://project.supabase.co",
         "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
         "SUPABASE_SERVICE_ROLE_KEY": "sb_secret_test",
@@ -136,7 +142,7 @@ def test_deployment_files_enforce_container_and_ci_contracts() -> None:
     assert "USER firemark" in dockerfile
     assert "COPY ." not in dockerfile
     assert ".env" in dockerignore and ".artifacts" in dockerignore and "tests" in dockerignore
-    assert "${PORT}" in railway and 'healthcheckPath = "/healthz"' in railway
+    assert "${PORT}" in dockerfile and 'healthcheckPath = "/healthz"' in railway
     for gate in (
         "pip check",
         "python -m pytest",

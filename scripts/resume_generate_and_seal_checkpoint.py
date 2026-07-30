@@ -756,6 +756,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
             run_id=checkpoint.run_id,
             provider=evidence.provider,
             model=evidence.model,
+            ai_generated=True,
             prompt_private=evidence.prompt,
             parameters_private={
                 "_firemark_request_fingerprint": _request_fingerprint(
@@ -773,8 +774,10 @@ def run_live(report_path: Path, *, force: bool) -> int:
         asset = AssetRecord(
             asset_id=checkpoint.asset_id,
             run_id=checkpoint.run_id,
+            asset_type="image",
             media_type="image/png",
             file_extension="png",
+            byte_size=sealed_receipt.size_bytes,
             source_sha256=checkpoint.source_sha256,
             sealed_sha256=checkpoint.sealed_sha256,
             assets_bucket=sealed_receipt.bucket,
@@ -862,6 +865,8 @@ def run_live(report_path: Path, *, force: bool) -> int:
         if extract_public_capsule_png(delivered) != capsule:
             _fail("VERIFICATION_FAILED")
         tracker.begin("database_secret_scan")
+        if config.openai_api_key is None:
+            _fail("OPENAI_NOT_CONFIGURED")
         _database_secret_scan(
             repository,
             type(

@@ -6,7 +6,7 @@ import { formatDuration } from "@/lib/format";
 import type { DeliverySuccess } from "@/lib/types";
 import { safeHttpUrl } from "@/lib/validation";
 
-export function DeliveryButton({ certId, presentedSha256 }: { certId: string; presentedSha256: string }) {
+export function DeliveryButton({ certId, presentedSha256, mimeType }: { certId: string; presentedSha256: string; mimeType?: string | null }) {
   const [delivery, setDelivery] = useState<DeliverySuccess | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
 
@@ -48,6 +48,11 @@ export function DeliveryButton({ certId, presentedSha256 }: { certId: string; pr
     <div className="delivery-action" aria-live="polite">
       {delivery ? (
         <>
+          {mimeType?.startsWith("audio/") && (
+            <audio controls preload="none" src={delivery.download_url}>
+              Your browser does not support secure audio playback.
+            </audio>
+          )}
           <a className="button button-primary" href={delivery.download_url} rel="noreferrer">
             Download verified asset
           </a>

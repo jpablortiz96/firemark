@@ -9,7 +9,7 @@ const RESULT_COPY: Record<
 > = {
   verified: {
     title: "Asset is authentic and unchanged",
-    body: "The local file hash and embedded capsule agree with the active signed FIREMARK record.",
+    body: "The local file hash agrees with the active signed FIREMARK record.",
     tone: "verified",
   },
   tampered: {
@@ -66,9 +66,9 @@ export function VerificationLayers({ result }: { result: LensResult }) {
       </div>
       <h2 id="lens-result-title">{copy.title}</h2>
       <p>{copy.body}</p>
-      {result.capsule && (
+      {(result.capsule || result.certId) && (
         <div className="lens-evidence-summary">
-          <div><span>Extracted certificate</span><code>{result.capsule.cert_id}</code></div>
+          <div><span>{result.mediaType === "audio" ? "Entered certificate" : "Extracted certificate"}</span><code>{result.certId ?? result.capsule?.cert_id}</code></div>
           {result.sealedSha256 && (
             <div><span>Calculated sealed SHA-256</span><code>{result.sealedSha256}</code></div>
           )}
@@ -90,16 +90,20 @@ export function VerificationLayers({ result }: { result: LensResult }) {
         come only from the backend Verify Gate.
       </p>
       <div className="result-actions">
-        {result.capsule && result.state !== "not_found" && (
+        {(result.certId || result.capsule) && result.state !== "not_found" && (
           <Link
             className="button button-secondary"
-            href={`/certificate/${encodeURIComponent(result.capsule.cert_id)}`}
+            href={`/certificate/${encodeURIComponent(result.certId ?? result.capsule!.cert_id)}`}
           >
             View Birth Certificate
           </Link>
         )}
-        {result.state === "verified" && result.capsule && result.sealedSha256 && (
-          <DeliveryButton certId={result.capsule.cert_id} presentedSha256={result.sealedSha256} />
+        {result.state === "verified" && (result.certId || result.capsule) && result.sealedSha256 && (
+          <DeliveryButton
+            certId={result.certId ?? result.capsule!.cert_id}
+            presentedSha256={result.sealedSha256}
+            mimeType={result.verification?.mime_type ?? result.mimeType}
+          />
         )}
       </div>
     </section>

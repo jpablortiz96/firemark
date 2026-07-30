@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from api.firemark.generation.fake_provider import _TINY_PNG
 from api.firemark.public_capsule import (
     PUBLIC_CAPSULE_KEY,
+    FiremarkPublicAudioReferenceV1,
     FiremarkPublicCapsuleV1,
     PublicCapsuleError,
     detect_duplicate_capsules,
@@ -162,3 +163,29 @@ def test_typescript_cross_language_fixture_is_generated_by_backend_contract() ->
     assert fixture["sealed_sha256"] == hashlib.sha256(sealed).hexdigest()
     assert extract_public_capsule_png(sealed) == expected
     assert "sealed_sha256" not in fixture["capsule"]
+
+
+def test_audio_public_reference_is_closed_safe_and_explicitly_not_embedded() -> None:
+    values: dict[str, object] = {
+        "cert_id": "firemark-cert-audio",
+        "asset_id": "firemark-asset-audio",
+        "run_id": "firemark-run-audio",
+        "canonical_hash": "1" * 64,
+        "source_sha256": "2" * 64,
+        "sealed_sha256": "2" * 64,
+        "signer_key_id": "firemark-ed25519-test",
+        "verify_url": "https://verify.firemark.test/v1/certificates/firemark-cert-audio",
+        "issued_at": datetime(2026, 7, 30, 12, tzinfo=UTC),
+    }
+    reference = FiremarkPublicAudioReferenceV1.model_validate(values)
+    assert reference.embedded is False
+    assert reference.verification_method == "cert_id+sha256"
+    for update, message in (
+        ({"issued_at": datetime(2026, 7, 30)}, "timezone-aware"),
+        ({"sealed_sha256": "bad"}, "SHA-256"),
+        ({"cert_id": "unsafe cert"}, "safe characters"),
+        ({"verify_url": "http://verify.firemark.test"}, "HTTPS"),
+        ({"verify_url": "https://verify.firemark.test/path?token=x"}, "metadata"),
+    ):
+        with pytest.raises(ValidationError, match=message):
+            FiremarkPublicAudioReferenceV1.model_validate({**values, **update})

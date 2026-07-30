@@ -19,7 +19,12 @@ from api.firemark.generate_and_seal import (
     GenerateAndSealService,
     IdempotencyConflictError,
 )
-from api.firemark.generation.fake_provider import _TINY_PNG, FakeGenerationProvider
+from api.firemark.generation.fake_provider import (
+    _TINY_MP3,
+    _TINY_PNG,
+    FakeAudioProvider,
+    FakeGenerationProvider,
+)
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
 from api.firemark.generation.provider import GenerationProviderError
 from api.firemark.hashing import sha256_bytes
@@ -67,11 +72,13 @@ class Harness:
         canonical = kwargs["canonical_hash"]
         retention = kwargs["retention_until"]
         manifest_hash = sha256_bytes(self.manifest_bytes)
+        extension = source_path.suffix.removeprefix(".")
+        content_type = kwargs["source_content_type"]
         assets_source = StoredObjectReceipt(
             bucket="assets-test",
-            key=f"assets/{source_hash}.png",
+            key=f"assets/{source_hash}.{extension}",
             sha256=source_hash,
-            content_type="image/png",
+            content_type=content_type,
             size_bytes=len(self.source_bytes),
             version_id="source-version",
             created_at=NOW,
@@ -88,7 +95,7 @@ class Harness:
         vault_source = LockedObjectReceipt(
             **assets_source.model_dump(exclude={"bucket", "key", "version_id"}),
             bucket="vault-test",
-            key=f"vault/sources/{source_hash}.png",
+            key=f"vault/sources/{source_hash}.{extension}",
             version_id="vault-source-version" if self.custody_version else None,
             retention_until=retention,
         )
@@ -116,16 +123,19 @@ class Harness:
         self.events.append("sealed_upload")
         self.sealed_bytes = kwargs["data"]
         assert kwargs["expected_sha256"] == sha256_bytes(self.sealed_bytes)
-        assert kwargs["metadata"] == {
-            "firemark-kind": "sealed",
-            "firemark-schema": "1",
-            "firemark-cert-id": extract_public_capsule_png(self.sealed_bytes).cert_id,
-        }
+        assert kwargs["metadata"]["firemark-kind"] == "sealed"
+        assert kwargs["metadata"]["firemark-schema"] == "1"
+        if kwargs["content_type"] == "image/png":
+            assert kwargs["metadata"]["firemark-cert-id"] == extract_public_capsule_png(
+                self.sealed_bytes
+            ).cert_id
+        else:
+            assert kwargs["metadata"]["firemark-cert-id"].startswith("firemark-cert-")
         return StoredObjectReceipt(
             bucket=kwargs["bucket"],
             key=kwargs["key"],
             sha256=kwargs["expected_sha256"],
-            content_type="image/png",
+            content_type=kwargs["content_type"],
             size_bytes=len(self.sealed_bytes),
             version_id="sealed-version" if self.sealed_version else None,
             created_at=NOW,
@@ -346,3 +356,35 @@ def test_http_request_rejects_unsafe_model_size_and_extra_private_parameters() -
         GenerateAndSealRequest(prompt=PROMPT, size="999x999")
     with pytest.raises(ValidationError):
         GenerateAndSealRequest.model_validate({"prompt": PROMPT, "seed": 123})
+
+
+def test_audio_generate_and_seal_uses_detached_public_reference_and_hash_gate() -> None:
+    harness = Harness()
+    audio = FakeAudioProvider()
+    service = harness.service(
+        audio_provider_factory=lambda: audio,
+        default_audio_voice_id="voice-safe",
+        default_audio_model="eleven_multilingual_v2",
+    )
+    result = service.generate_and_seal(
+        GenerateAndSealRequest(media_type="audio", provider="elevenlabs", text="private speech"),
+        idempotency_key=IDEMPOTENCY_KEY,
+    )
+    assert audio.calls == 1
+    assert harness.source_bytes == _TINY_MP3 == harness.sealed_bytes
+    assert result.media_type == "audio"
+    assert result.mime_type == "audio/mpeg"
+    assert result.source_sha256 == result.sealed_sha256
+    certificate = harness.repository.get_certificate(result.cert_id)
+    assert certificate is not None and certificate.asset is not None
+    assert certificate.asset.asset_type == "audio"
+    assert certificate.asset.assets_key.endswith(".mp3")
+    assert certificate.public_manifest["embedded"] is False
+    assert certificate.public_manifest["verification_method"] == "cert_id+sha256"
+    verified = harness.certificate_service.verify(
+        __import__(
+            "api.firemark.control_plane.models", fromlist=["VerificationRequest"]
+        ).VerificationRequest(cert_id=result.cert_id, presented_sha256=result.sealed_sha256),
+        now=NOW,
+    )
+    assert verified.verified and verified.media_type == "audio"

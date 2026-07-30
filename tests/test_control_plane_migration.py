@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 MIGRATION = Path("supabase/migrations/20260729000100_firemark_control_plane.sql")
+MULTIMEDIA_MIGRATION = Path("supabase/migrations/20260730000100_firemark_multimedia.sql")
 
 
 def _sql() -> str:
@@ -77,3 +78,21 @@ def test_atomic_registration_rpc_is_service_role_only() -> None:
     assert "immutable certificate conflict" in sql
     assert "from public, anon, authenticated" in sql
     assert "to service_role" in sql
+
+
+def test_multimedia_migration_extends_immutable_bundle_and_public_allowlist() -> None:
+    sql = MULTIMEDIA_MIGRATION.read_text(encoding="utf-8").lower()
+    for field in (
+        "asset_type", "media_type", "mime_type", "byte_size", "ai_generated",
+        "width", "height", "duration_ms", "provider", "model", "source_sha256",
+    ):
+        assert field in sql
+    assert "asset_type in ('image', 'audio')" in sql
+    assert "assets_image_hashes_distinct" in sql
+    assert "asset_type <> 'image' or source_sha256 <> sealed_sha256" in sql
+    assert "firemark.public-audio-reference" not in sql
+    assert "create or replace function public.register_firemark_certificate_bundle" in sql
+    assert "to anon, authenticated, service_role" in sql
+    assert "prompt_private" not in sql.split(
+        "returns table (", 1
+    )[1].split(")\nlanguage sql", 1)[0]
