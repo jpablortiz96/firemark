@@ -24,6 +24,8 @@ SupabaseKeyFamily = Literal[
     "UNKNOWN",
 ]
 _BUCKET_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{4,48}[A-Za-z0-9]$")
+_LOCAL_CORS_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_DEFAULT_ALLOWED_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
 
 
 def classify_supabase_key(value: str | None) -> SupabaseKeyFamily:
@@ -152,6 +154,7 @@ class Settings(BaseModel):
 
     environment: Environment = "local"
     repository_backend: RepositoryBackend = "memory"
+    allowed_origins: tuple[str, ...] = _DEFAULT_ALLOWED_ORIGINS
     base_url: str | None = None
     signing_key: SecretStr | None = None
     public_key: str | None = None
@@ -195,6 +198,43 @@ class Settings(BaseModel):
             choices = ", ".join(sorted(allowed))
             raise ValueError(f"FIREMARK_ENV must be one of: {choices}")
         return value
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def validate_allowed_origins(cls, value: object) -> tuple[str, ...]:
+        """Parse a strict JSON origin list and allow HTTP only for local development."""
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError("FIREMARK_ALLOWED_ORIGINS must be a JSON array") from exc
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("FIREMARK_ALLOWED_ORIGINS must be a JSON array")
+        normalized: list[str] = []
+        for origin in value:
+            if not isinstance(origin, str) or origin == "*":
+                raise ValueError("FIREMARK_ALLOWED_ORIGINS contains an invalid origin")
+            parsed = urlsplit(origin)
+            try:
+                parsed_port = parsed.port
+            except ValueError as exc:
+                raise ValueError("FIREMARK_ALLOWED_ORIGINS contains an invalid port") from exc
+            if not parsed.hostname or parsed.username or parsed.password:
+                raise ValueError("FIREMARK_ALLOWED_ORIGINS contains an invalid origin")
+            if parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+                raise ValueError("FIREMARK_ALLOWED_ORIGINS must contain origins only")
+            scheme = parsed.scheme.lower()
+            hostname = parsed.hostname.lower()
+            if scheme != "https" and not (scheme == "http" and hostname in _LOCAL_CORS_HOSTS):
+                raise ValueError(
+                    "FIREMARK_ALLOWED_ORIGINS requires HTTPS except for localhost"
+                )
+            host = f"[{hostname}]" if ":" in hostname else hostname
+            netloc = f"{host}:{parsed_port}" if parsed_port is not None else host
+            normalized_origin = urlunsplit((scheme, netloc, "", "", ""))
+            if normalized_origin not in normalized:
+                normalized.append(normalized_origin)
+        return tuple(normalized)
 
     @field_validator("b2_endpoint")
     @classmethod
@@ -586,6 +626,7 @@ class Settings(BaseModel):
 _ENVIRONMENT_FIELDS = {
     "FIREMARK_ENV": "environment",
     "FIREMARK_REPOSITORY_BACKEND": "repository_backend",
+    "FIREMARK_ALLOWED_ORIGINS": "allowed_origins",
     "FIREMARK_BASE_URL": "base_url",
     "FIREMARK_SIGNING_KEY": "signing_key",
     "FIREMARK_PUBLIC_KEY": "public_key",

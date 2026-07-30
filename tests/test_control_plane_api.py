@@ -73,6 +73,26 @@ def test_factory_health_dependency_injection_and_openapi_are_zero_network() -> N
     )
 
 
+def test_cors_accepts_allowlisted_local_origin_and_rejects_unknown_origin() -> None:
+    client, _, _ = _client()
+    headers = {
+        "Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+    }
+    accepted = client.options("/v1/verify", headers=headers)
+    assert accepted.status_code == 200
+    assert accepted.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "access-control-allow-credentials" not in accepted.headers
+
+    rejected = client.options(
+        "/v1/verify",
+        headers={**headers, "Origin": "https://untrusted.example"},
+    )
+    assert rejected.status_code == 400
+    assert "access-control-allow-origin" not in rejected.headers
+
+
 def test_certificate_api_active_missing_revoked_and_private_fields_absent() -> None:
     client, repository, evidence = _client()
     active = client.get(f"/v1/certificates/{evidence.envelope.cert_id}")

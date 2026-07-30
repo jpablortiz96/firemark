@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
@@ -52,6 +53,15 @@ def create_app(
         title="FIREMARK Control Plane",
         version="0.1.0",
         description="Public Birth Certificates and verification-gated delivery.",
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(selected_settings.allowed_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Accept", "Content-Type"],
+        expose_headers=["X-Request-ID"],
+        max_age=600,
     )
     app.state.settings = selected_settings
     app.state.runtime = runtime

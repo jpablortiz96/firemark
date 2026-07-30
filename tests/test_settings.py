@@ -14,6 +14,7 @@ from api.firemark.settings import Settings, classify_supabase_key, load_settings
 ENVIRONMENT_VARIABLES = (
     "FIREMARK_ENV",
     "FIREMARK_REPOSITORY_BACKEND",
+    "FIREMARK_ALLOWED_ORIGINS",
     "FIREMARK_BASE_URL",
     "FIREMARK_SIGNING_KEY",
     "FIREMARK_PUBLIC_KEY",
@@ -87,6 +88,40 @@ def test_defaults_allow_zero_network_imports_without_credentials() -> None:
     assert settings.b2_assets_app_key is None
     assert settings.vault_retention_days is None
     assert settings.presigned_url_ttl_seconds == 300
+    assert settings.allowed_origins == (
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    )
+
+
+def test_allowed_origins_load_as_strict_normalized_json_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "FIREMARK_ALLOWED_ORIGINS",
+        '["https://app.firemark.test/", "http://localhost:3100"]',
+    )
+    assert load_settings().allowed_origins == (
+        "https://app.firemark.test",
+        "http://localhost:3100",
+    )
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        "https://app.firemark.test",
+        '["*"]',
+        '["http://app.firemark.test"]',
+        '["https://user:secret@app.firemark.test"]',
+        '["https://app.firemark.test/path"]',
+        '["https://app.firemark.test?private=value"]',
+        '["https://app.firemark.test:invalid"]',
+    ],
+)
+def test_allowed_origins_reject_unsafe_or_non_list_values(origins: str) -> None:
+    with pytest.raises(ValidationError, match="FIREMARK_ALLOWED_ORIGINS"):
+        Settings(allowed_origins=origins)  # type: ignore[arg-type]
 
 
 def test_complete_separate_assets_and_vault_configuration() -> None:

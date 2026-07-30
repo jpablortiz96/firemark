@@ -55,16 +55,16 @@ Kernel, Control Plane, and production Generate & Seal path for PNG images. The l
 has proved COMPLIANCE retention and the live Supabase checkpoint has proved RLS, atomic
 registration, public projection, events, and revocation. Generate & Seal now wires the official
 OpenAI SDK, private canonical provenance, capsule embedding, custody, sealed storage, signing,
-atomic registration, and authenticated delivery. Its live evidence remains pending the explicit
-owner-run checkpoint; ordinary tests remain zero-network.
+atomic registration, and authenticated delivery. The completed live Generate & Seal checkpoint
+proved that entire path against real OpenAI, B2, and Supabase services. Ordinary tests remain
+zero-network.
 
 ## Roadmap
 
 Completed milestones are repository foundation, Trust Kernel, SealEnvelopeV1, Genblaze
 provenance, B2 Custody and live COMPLIANCE proof, FastAPI Control Plane, Supabase schema and live
-verification, and the local production wiring for Generate & Seal. Remaining work is the public
-Birth Certificate frontend, Verify Gate user experience, deployment, one real demo generation,
-and hackathon submission.
+verification, live Generate & Seal, and the local public web experience. Remaining work is
+deployment, demo recording, and hackathon submission.
 
 ## Control Plane
 
@@ -149,6 +149,33 @@ Generation and delivery use distinct `SecretStr` bearer credentials and constant
 Missing or invalid bearer credentials return 401; public health, Birth Certificate, and Verify
 routes remain anonymous. The prompt is sent only to the selected provider and retained only in the
 private generation run.
+
+## Public web experience
+
+The Next.js App Router application lives in `web/`. It uses React Server Components for the
+landing and certificate routes, a focused Client Component for Verify Gate interaction, and one
+server-side route handler for authenticated delivery. The browser calls only the public
+certificate and verification endpoints. It never receives `FIREMARK_DELIVERY_API_KEY`; the route
+handler exchanges that server-only bearer for a short-lived URL after FastAPI independently
+repeats verification.
+
+| Surface | Route | Purpose |
+| --- | --- | --- |
+| Landing | `/` | Product thesis, Generate & Seal, Birth Certificate, and Verify Gate. |
+| Certificate | `/certificate/[certId]` | Redacted public certificate with trust summary and technical details. |
+| Verify Gate | `/verify` | Certificate and optional sealed-hash verification. |
+| Delivery proxy | `POST /api/delivery/[certId]` | Server-only authenticated delivery exchange. |
+
+The typed frontend client validates certificate IDs, SHA-256 digests, safe response shapes, public
+manifest fields, and URL schemes. Requests have bounded timeouts and normalized errors; raw
+backend exceptions are not shown. Short-lived delivery URLs remain only in the successful browser
+response and component memory. They are not logged or written to storage.
+
+FastAPI CORS is driven by `FIREMARK_ALLOWED_ORIGINS`, a strict JSON list. HTTPS origins are
+required except for explicit `localhost`, `127.0.0.1`, or `::1` development origins. Wildcards,
+credentials in origins, paths, queries, fragments, and credentialed CORS are rejected. The default
+allows only `http://localhost:3000` and `http://127.0.0.1:3000`. Application construction remains
+zero-network.
 
 ## Genblaze local provenance roundtrip
 
@@ -274,6 +301,7 @@ OPENAI_IMAGE_MODEL=
 OPENAI_IMAGE_SIZE=
 FIREMARK_GENERATION_TIMEOUT_SECONDS=
 FIREMARK_MAX_GENERATED_IMAGE_BYTES=
+FIREMARK_ALLOWED_ORIGINS=
 ```
 
 Prefer a current `sb_publishable_` public key and a distinct current `sb_secret_` backend key.
@@ -317,6 +345,38 @@ missing, ambiguous, or differently revoked bundles fail closed.
 The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
 The settings loader reads process environment variables explicitly; it does not automatically load
 the `.env` file. Only explicitly live CLI checkpoints load the ignored repository `.env`.
+
+Configure the local web application separately in ignored `web/.env.local`:
+
+```text
+NEXT_PUBLIC_FIREMARK_API_BASE_URL=http://127.0.0.1:8000
+FIREMARK_DELIVERY_API_KEY=
+FIREMARK_PUBLIC_SITE_URL=http://localhost:3000
+```
+
+Only `NEXT_PUBLIC_FIREMARK_API_BASE_URL` is browser-visible. The delivery bearer and public site
+configuration stay server-side. Start both local processes in separate PowerShell terminals:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe -m uvicorn api.firemark.app:create_app `
+  --factory --host 127.0.0.1 --port 8000
+```
+
+```powershell
+cd D:\firemark\web
+npm install
+npm run dev
+```
+
+Run the frontend quality gate with:
+
+```powershell
+cd D:\firemark\web
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+```
 
 Review the non-live Generate & Seal command first. It constructs no provider, B2, or Supabase
 client and exits with informational code 2. The explicitly live command makes exactly one real
@@ -504,11 +564,10 @@ or verify a complete Manifest without resolving `manifest_uri`.
 ## Honest limitations
 
 The historical B2 Custody smoke uses a local fixture and therefore does not prove provider
-generation. The B2 and Supabase live checkpoints are environment-specific evidence, not a claim
-that the complete application is deployed. Generate & Seal has comprehensive zero-network contract
-tests; environment-specific real OpenAI and isolated B2 evidence exists, while the interrupted
-combined checkpoint is not a completed production certificate.
-The public frontend, Birth Certificate experience, Verify Gate user experience, deployment, real
-demo generation, and hackathon submission remain pending. B2 custody spans multiple objects and is
-not cross-object atomic; a registration failure can leave safe, billable partial storage that must
-be inspected before operational cleanup.
+generation by itself. The completed Generate & Seal checkpoint provides separate live evidence for
+the combined path, but neither that checkpoint nor the local web build claims that the complete
+application is deployed. The responsive public frontend, Birth Certificate experience, Verify Gate,
+and secure delivery proxy are implemented and tested locally. Deployment, demo recording, and the
+hackathon submission remain pending. B2 custody spans multiple objects and is not cross-object
+atomic; a registration failure can leave safe, billable partial storage that must be inspected
+before operational cleanup.
