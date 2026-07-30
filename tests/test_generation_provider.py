@@ -15,6 +15,7 @@ from openai import (
     AuthenticationError,
     BadRequestError,
     InternalServerError,
+    PermissionDeniedError,
     RateLimitError,
 )
 from pydantic import ValidationError
@@ -142,6 +143,14 @@ def test_official_url_response_is_downloaded_once_with_no_redirect() -> None:
             "authentication",
         ),
         (
+            PermissionDeniedError(
+                "secret upstream detail",
+                response=httpx.Response(403, request=httpx.Request("POST", "https://api.openai.com")),
+                body=None,
+            ),
+            "permission_denied",
+        ),
+        (
             RateLimitError(
                 "secret upstream detail",
                 response=httpx.Response(429, request=httpx.Request("POST", "https://api.openai.com")),
@@ -193,6 +202,26 @@ def test_safety_failure_is_classified_intentionally() -> None:
         provider(Images(error=error)).generate_image(request())
 
 
+def test_quota_and_model_size_failures_are_distinct() -> None:
+    quota = RateLimitError(
+        "private quota response",
+        response=httpx.Response(429, request=httpx.Request("POST", "https://api.openai.com")),
+        body={"code": "insufficient_quota"},
+    )
+    quota.code = "insufficient_quota"
+    model = BadRequestError(
+        "private model response",
+        response=httpx.Response(400, request=httpx.Request("POST", "https://api.openai.com")),
+        body={"code": "model_not_found", "param": "model"},
+    )
+    model.code = "model_not_found"
+    model.param = "model"
+    with pytest.raises(GenerationProviderError, match="quota_or_billing"):
+        provider(Images(error=quota)).generate_image(request())
+    with pytest.raises(GenerationProviderError, match="model_or_size_unsupported"):
+        provider(Images(error=model)).generate_image(request())
+
+
 @pytest.mark.parametrize(
     "bad_response",
     [
@@ -205,7 +234,16 @@ def test_safety_failure_is_classified_intentionally() -> None:
     ],
 )
 def test_malformed_response_shapes_and_non_png_fail_closed(bad_response: object) -> None:
-    with pytest.raises(GenerationProviderError, match="malformed_response"):
+    response_data = getattr(bad_response, "data", None)
+    expected = (
+        "non_png_response"
+        if isinstance(response_data, list)
+        and response_data
+        and getattr(response_data[0], "b64_json", "")
+        == base64.b64encode(b"not-png").decode()
+        else "malformed_response"
+    )
+    with pytest.raises(GenerationProviderError, match=expected):
         provider(Images(bad_response)).generate_image(request())
 
 
@@ -241,8 +279,8 @@ def test_download_redirect_http_failure_declared_and_streamed_oversize_are_safe(
 
     assert run(302, b"", {"Location": "https://images.openai.com/other"}) == "malformed_response"
     assert run(503, b"unavailable") == "unavailable"
-    assert run(200, b"x", {"Content-Length": str(2 * 1024 * 1024)}) == "malformed_response"
-    assert run(200, b"x" * (1024 * 1024 + 1)) == "malformed_response"
+    assert run(200, b"x", {"Content-Length": str(2 * 1024 * 1024)}) == "response_too_large"
+    assert run(200, b"x" * (1024 * 1024 + 1)) == "response_too_large"
 
 
 def test_generation_models_reject_private_invalid_and_oversized_shapes() -> None:

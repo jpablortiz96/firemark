@@ -34,7 +34,9 @@ def test_help_contract_and_exact_live_stage_list() -> None:
     assert smoke.STAGES == (
         "configuration_validation",
         "dependency_construction",
+        "provider_request_construction",
         "provider_generation",
+        "provider_response_validation",
         "source_hash",
         "genblaze_manifest",
         "canonical_hash",
@@ -64,7 +66,10 @@ def test_live_with_incomplete_configuration_fails_safely_before_clients(
     monkeypatch.setattr(smoke, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
     assert smoke.main(["--live", "--output-report", str(tmp_path / "report.json")]) == 1
     output = capsys.readouterr().out
-    assert output == "FAIL: configuration_validation (LIVE_CHECKPOINT_FAILED)\n"
+    assert output == (
+        "FAIL: configuration_validation "
+        "(CATEGORY=CONFIGURATION_ERROR)\n"
+    )
     assert secret not in output
 
 
@@ -87,10 +92,76 @@ def test_safe_report_writer_is_atomic_refuses_overwrite_and_contains_no_secret(
 
 def test_capture_delegates_each_generation_once_without_repr_or_logging() -> None:
     class Provider:
-        def generate_image(self, request: object) -> object:
+        def build_request_parameters(self, request: object) -> dict[str, object]:
+            return {"request": request}
+
+        def construct_client(self) -> object:
+            return object()
+
+        def request_image(self, client: object, parameters: object) -> object:
+            del client
+            return parameters
+
+        def validate_response(self, response: object, request: object) -> object:
+            del response
             return request
 
     capture = smoke.Capture(Provider())  # type: ignore[arg-type]
     request = object()
     assert capture.generate_image(request) is request  # type: ignore[arg-type]
     assert capture.provider_calls == 1
+
+
+def test_full_smoke_failure_keeps_exact_provider_stage_and_safe_code(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from api.firemark.generation.provider import GenerationProviderError
+
+    config = SimpleNamespace(
+        openai_api_key=SecretStr("private-openai-value"),
+        generation_timeout_seconds=30,
+        max_generated_image_bytes=1024 * 1024,
+        b2=SimpleNamespace(assets=object(), vault=object()),
+    )
+    settings = SimpleNamespace(
+        require_generate_and_seal_config=lambda: config,
+        require_live_supabase_control_plane_config=lambda: object(),
+    )
+
+    class Service:
+        def __init__(self, callback: object) -> None:
+            self.callback = callback
+
+        def generate_and_seal(self, request: object, *, idempotency_key: str) -> None:
+            del request, idempotency_key
+            self.callback("provider_request_construction")  # type: ignore[operator]
+            self.callback("provider_generation")  # type: ignore[operator]
+            raise GenerationProviderError("authentication")
+
+    def fake_runtime(
+        incoming: object, *, production_overrides: dict[str, object]
+    ) -> object:
+        assert incoming is settings
+        return SimpleNamespace(
+            generate_and_seal_service=Service(production_overrides["stage_callback"])
+        )
+
+    monkeypatch.setattr(smoke, "DEFAULT_ENV_FILE", tmp_path / "missing.env")
+    monkeypatch.setattr(smoke, "load_settings", lambda: settings)
+    monkeypatch.setattr(smoke, "build_runtime", fake_runtime)
+    assert smoke.run_live(tmp_path / "report.json", force=False) == 1
+    output = capsys.readouterr().out
+    assert "PASS: configuration_validation" in output
+    assert "PASS: dependency_construction" in output
+    assert "PASS: provider_request_construction" in output
+    assert output.endswith(
+        "FAIL: provider_generation "
+        "(CATEGORY=AUTHENTICATION_FAILURE, PROVIDER_CODE=authentication)\n"
+    )
+    assert "private-openai-value" not in output

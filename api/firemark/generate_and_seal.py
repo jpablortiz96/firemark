@@ -111,6 +111,7 @@ ClientFactory = Callable[[], Any]
 SignerFactory = Callable[[], Ed25519Signer]
 CustodyExecutor = Callable[..., B2CustodyReceipt]
 SealedUploader = Callable[..., StoredObjectReceipt]
+StageCallback = Callable[[str], None]
 
 
 def _request_fingerprint(prompt: str, model: str, size: str) -> str:
@@ -200,6 +201,7 @@ class GenerateAndSealService:
         custody_executor: CustodyExecutor = execute_b2_custody,
         sealed_uploader: SealedUploader = upload_bytes_verified,
         now: Callable[[], datetime] | None = None,
+        stage_callback: StageCallback | None = None,
     ) -> None:
         self.certificate_service = certificate_service
         self.provider_factory = provider_factory
@@ -218,6 +220,7 @@ class GenerateAndSealService:
         self.custody_executor = custody_executor
         self.sealed_uploader = sealed_uploader
         self._now = now or (lambda: datetime.now(UTC))
+        self._stage_callback = stage_callback or (lambda _stage: None)
         self._lock = threading.Lock()
 
     def _completed(
@@ -250,6 +253,7 @@ class GenerateAndSealService:
         run_id, asset_id, cert_id = _identifiers(idempotency_key)
         fingerprint = _request_fingerprint(request.prompt, model, size)
         with self._lock:
+            self._stage_callback("dependency_construction")
             completed = self._completed(cert_id, run_id, asset_id)
             if completed is not None:
                 stored = self.certificate_service.repository.get_generation_request_fingerprint(
@@ -259,6 +263,7 @@ class GenerateAndSealService:
                     raise IdempotencyConflictError
                 return completed
             timestamp = self._now().astimezone(UTC)
+            self._stage_callback("provider_request_construction")
             provider_request = GenerationRequest(
                 prompt=request.prompt,
                 model=model,
@@ -266,11 +271,14 @@ class GenerateAndSealService:
                 request_id=run_id,
             )
             image = self.provider_factory().generate_image(provider_request)
+            self._stage_callback("provider_response_validation")
             if not image.ai_generated and not self.allow_local_fixture:
                 raise GenerateAndSealError("NON_PRODUCTION_PROVIDER")
             if len(image.data) > self.max_generated_image_bytes:
                 raise GenerateAndSealError("GENERATED_IMAGE_TOO_LARGE")
+            self._stage_callback("source_hash")
             source_sha256 = sha256_bytes(image.data)
+            self._stage_callback("genblaze_manifest")
             manifest = _build_manifest(
                 image,
                 provider_request,
@@ -278,7 +286,9 @@ class GenerateAndSealService:
                 source_sha256=source_sha256,
             )
             manifest_bytes = manifest.to_canonical_json().encode("utf-8")
+            self._stage_callback("canonical_hash")
             canonical_hash = manifest.canonical_hash
+            self._stage_callback("public_capsule_embedding")
             signer = self.signer_factory()
             if not signer.can_sign:
                 raise GenerateAndSealError("SIGNING_KEY_UNAVAILABLE")
@@ -295,10 +305,12 @@ class GenerateAndSealService:
                 }
             )
             sealed_bytes = embed_public_capsule_png(image.data, capsule)
+            self._stage_callback("sealed_hash")
             sealed_sha256 = sha256_bytes(sealed_bytes)
             if hmac.compare_digest(source_sha256, sealed_sha256):
                 raise GenerateAndSealError("SEALED_HASH_UNCHANGED")
             retention_until = timestamp + timedelta(days=self.retention_days)
+            self._stage_callback("vault_custody")
             assets_client = self.assets_client_factory()
             vault_client = self.vault_client_factory()
             with tempfile.TemporaryDirectory(prefix="firemark-generate-") as directory:
@@ -326,6 +338,7 @@ class GenerateAndSealService:
             vault_manifest_version = custody_receipt.vault_manifest.version_id
             if vault_source_version is None or vault_manifest_version is None:
                 raise GenerateAndSealError("CUSTODY_VERSION_UNAVAILABLE")
+            self._stage_callback("sealed_asset_upload")
             sealed_key = sealed_asset_key(sealed_sha256)
             sealed_receipt = self.sealed_uploader(
                 assets_client,
@@ -345,6 +358,7 @@ class GenerateAndSealService:
                 raise GenerateAndSealError(
                     "SEALED_VERSION_UNAVAILABLE", partial_keys=(sealed_key,)
                 )
+            self._stage_callback("envelope_signature")
             generation_run = GenerationRunRecord(
                 run_id=run_id,
                 provider=image.provider,
@@ -404,6 +418,7 @@ class GenerateAndSealService:
                 created_at=timestamp,
             )
             signed = sign_envelope(envelope, signer)
+            self._stage_callback("supabase_registration")
             try:
                 self.certificate_service.register_certificate(
                     generation_run=generation_run,

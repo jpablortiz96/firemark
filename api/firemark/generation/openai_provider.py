@@ -18,8 +18,11 @@ from openai import (
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
+    NotFoundError,
     OpenAI,
+    PermissionDeniedError,
     RateLimitError,
+    UnprocessableEntityError,
 )
 
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
@@ -61,17 +64,73 @@ class OpenAIImageProvider:
             return self._client_factory()
         return OpenAI(api_key=self._api_key, timeout=float(self._timeout_seconds))
 
+    def construct_client(self) -> Any:
+        """Construct the SDK client without making a provider request."""
+        return self._client()
+
+    @staticmethod
+    def _error_code(exc: Exception) -> str:
+        value = getattr(exc, "code", None)
+        if isinstance(value, str):
+            return value.lower()
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            nested = body.get("error")
+            if isinstance(nested, dict):
+                value = nested.get("code")
+            else:
+                value = body.get("code")
+            if isinstance(value, str):
+                return value.lower()
+        return ""
+
+    @staticmethod
+    def _error_parameter(exc: Exception) -> str:
+        value = getattr(exc, "param", None)
+        if isinstance(value, str):
+            return value.lower()
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            nested = body.get("error")
+            if isinstance(nested, dict):
+                value = nested.get("param")
+            else:
+                value = body.get("param")
+            if isinstance(value, str):
+                return value.lower()
+        return ""
+
     @staticmethod
     def _failure_code(exc: Exception) -> ProviderFailureCode:
         if isinstance(exc, AuthenticationError):
             return "authentication"
+        if isinstance(exc, PermissionDeniedError):
+            return "permission_denied"
         if isinstance(exc, RateLimitError):
+            if OpenAIImageProvider._error_code(exc) in {
+                "billing_hard_limit_reached",
+                "billing_not_active",
+                "insufficient_quota",
+                "quota_exceeded",
+            }:
+                return "quota_or_billing"
             return "rate_limit"
         if isinstance(exc, APITimeoutError):
             return "timeout"
-        if isinstance(exc, BadRequestError):
-            code = str(getattr(exc, "code", "") or "").lower()
-            return "safety_rejection" if "safety" in code or "content_policy" in code else "invalid_request"
+        if isinstance(exc, (BadRequestError, NotFoundError, UnprocessableEntityError)):
+            code = OpenAIImageProvider._error_code(exc)
+            if "safety" in code or "content_policy" in code:
+                return "safety_rejection"
+            if OpenAIImageProvider._error_parameter(exc) in {"model", "size"} or code in {
+                "invalid_image_size",
+                "invalid_model",
+                "invalid_size",
+                "model_not_found",
+                "unsupported_model",
+                "unsupported_size",
+            }:
+                return "model_or_size_unsupported"
+            return "invalid_request"
         if isinstance(exc, (APIConnectionError, APIStatusError)):
             return "unavailable"
         return "malformed_response"
@@ -105,12 +164,12 @@ class OpenAIImageProvider:
                     response.raise_for_status()
                     declared = response.headers.get("content-length")
                     if declared is not None and int(declared) > self._max_image_bytes:
-                        raise GenerationProviderError("malformed_response")
+                        raise GenerationProviderError("response_too_large")
                     payload = bytearray()
                     for chunk in response.iter_bytes():
                         payload.extend(chunk)
                         if len(payload) > self._max_image_bytes:
-                            raise GenerationProviderError("malformed_response")
+                            raise GenerationProviderError("response_too_large")
                     return bytes(payload)
         except GenerationProviderError:
             raise
@@ -130,10 +189,11 @@ class OpenAIImageProvider:
                 raise GenerationProviderError("malformed_response")
             payload = self._download(url)
         if len(payload) > self._max_image_bytes:
-            raise GenerationProviderError("malformed_response")
+            raise GenerationProviderError("response_too_large")
         return payload
 
-    def generate_image(self, request: GenerationRequest) -> GeneratedImage:
+    def build_request_parameters(self, request: GenerationRequest) -> dict[str, Any]:
+        """Build the pinned SDK request without contacting OpenAI."""
         parameters: dict[str, Any] = {
             "prompt": request.prompt,
             "model": request.model,
@@ -145,12 +205,21 @@ class OpenAIImageProvider:
             parameters["response_format"] = "b64_json"
         else:
             parameters["output_format"] = "png"
+        return parameters
+
+    def request_image(self, client: Any, parameters: dict[str, Any]) -> Any:
+        """Perform exactly one SDK image-generation request with safe failures."""
         try:
-            response = self._client().images.generate(**parameters)
+            return client.images.generate(**parameters)
         except Exception as exc:
             if isinstance(exc, GenerationProviderError):
                 raise
             raise GenerationProviderError(self._failure_code(exc)) from None
+
+    def validate_response(
+        self, response: Any, request: GenerationRequest
+    ) -> GeneratedImage:
+        """Validate and normalize one official SDK image response."""
         data = getattr(response, "data", None)
         if not isinstance(data, list) or len(data) != 1:
             raise GenerationProviderError("malformed_response")
@@ -164,8 +233,11 @@ class OpenAIImageProvider:
             else None
         )
         try:
+            payload = self._payload(data[0])
+            if not payload.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise GenerationProviderError("non_png_response")
             return GeneratedImage(
-                data=self._payload(data[0]),
+                data=payload,
                 provider="openai",
                 model=request.model,
                 provider_request_id=safe_request_id,
@@ -179,3 +251,9 @@ class OpenAIImageProvider:
             )
         except (OSError, OverflowError, ValueError):
             raise GenerationProviderError("malformed_response") from None
+
+    def generate_image(self, request: GenerationRequest) -> GeneratedImage:
+        parameters = self.build_request_parameters(request)
+        client = self.construct_client()
+        response = self.request_image(client, parameters)
+        return self.validate_response(response, request)

@@ -28,6 +28,7 @@ from api.firemark.custody import B2CustodyReceipt, StoredObjectReceipt, execute_
 from api.firemark.generate_and_seal import GenerateAndSealRequest
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
 from api.firemark.generation.openai_provider import OpenAIImageProvider
+from api.firemark.generation.provider import GenerationProviderError
 from api.firemark.hashing import sha256_bytes
 from api.firemark.public_capsule import extract_public_capsule_png
 from api.firemark.seal_envelope import verify_signed_envelope
@@ -39,7 +40,9 @@ DEFAULT_REPORT = Path(".artifacts/generate-and-seal-report.json")
 STAGES = (
     "configuration_validation",
     "dependency_construction",
+    "provider_request_construction",
     "provider_generation",
+    "provider_response_validation",
     "source_hash",
     "genblaze_manifest",
     "canonical_hash",
@@ -63,11 +66,64 @@ class LiveSmokeError(RuntimeError):
     """Safe failure containing only a normalized stage reason."""
 
 
+_PROVIDER_CATEGORIES = {
+    "authentication": "AUTHENTICATION_FAILURE",
+    "permission_denied": "PERMISSION_DENIED",
+    "quota_or_billing": "QUOTA_OR_BILLING_FAILURE",
+    "rate_limit": "RATE_LIMIT",
+    "invalid_request": "INVALID_REQUEST",
+    "model_or_size_unsupported": "MODEL_OR_SIZE_UNSUPPORTED",
+    "safety_rejection": "SAFETY_REJECTION",
+    "timeout": "TIMEOUT",
+    "unavailable": "PROVIDER_UNAVAILABLE",
+    "malformed_response": "MALFORMED_RESPONSE",
+    "non_png_response": "NON_PNG_RESPONSE",
+    "response_too_large": "RESPONSE_TOO_LARGE",
+}
+
+
+class StageTracker:
+    """Advance an ordered stage before work and emit only safe status lines."""
+
+    def __init__(self) -> None:
+        self.current = STAGES[0]
+        self.completed: list[dict[str, str]] = []
+
+    def begin(self, stage: str) -> None:
+        if stage == self.current:
+            return
+        if STAGES.index(stage) < STAGES.index(self.current):
+            raise LiveSmokeError("STAGE_ORDER_INVALID")
+        self.complete_current()
+        self.current = stage
+
+    def complete_current(self) -> None:
+        if any(item["stage"] == self.current for item in self.completed):
+            return
+        self.completed.append({"stage": self.current, "status": "PASS"})
+        print(f"PASS: {self.current}")
+
+    def fail(self, exc: Exception) -> None:
+        provider_code = exc.code if isinstance(exc, GenerationProviderError) else None
+        category = (
+            _PROVIDER_CATEGORIES.get(provider_code, "UNKNOWN_SAFE_ERROR")
+            if provider_code is not None
+            else "CONFIGURATION_ERROR"
+            if self.current == "configuration_validation"
+            else "LOCAL_ADAPTER_ERROR"
+            if isinstance(exc, LiveSmokeError)
+            else "UNKNOWN_SAFE_ERROR"
+        )
+        suffix = f", PROVIDER_CODE={provider_code}" if provider_code is not None else ""
+        print(f"FAIL: {self.current} (CATEGORY={category}{suffix})")
+
+
 class Capture:
     """Observe safe outputs while delegating every live operation exactly once."""
 
-    def __init__(self, provider: OpenAIImageProvider) -> None:
+    def __init__(self, provider: OpenAIImageProvider, stage_callback: Any = None) -> None:
         self.provider = provider
+        self.stage_callback = stage_callback or (lambda _stage: None)
         self.provider_calls = 0
         self.image: GeneratedImage | None = None
         self.manifest_bytes: bytes | None = None
@@ -79,7 +135,12 @@ class Capture:
 
     def generate_image(self, request: GenerationRequest) -> GeneratedImage:
         self.provider_calls += 1
-        self.image = self.provider.generate_image(request)
+        parameters = self.provider.build_request_parameters(request)
+        self.stage_callback("provider_generation")
+        client = self.provider.construct_client()
+        response = self.provider.request_image(client, parameters)
+        self.stage_callback("provider_response_validation")
+        self.image = self.provider.validate_response(response, request)
         return self.image
 
     def custody_executor(self, **kwargs: Any) -> B2CustodyReceipt:
@@ -149,21 +210,14 @@ def _database_secret_scan(repository: Any, result: Any, secrets: Sequence[str]) 
 
 
 def run_live(report_path: Path, *, force: bool) -> int:
-    completed: list[dict[str, str]] = []
-    current_stage = STAGES[0]
-
-    def passed(stage: str) -> None:
-        nonlocal current_stage
-        current_stage = stage
-        completed.append({"stage": stage, "status": "PASS"})
-        print(f"PASS: {stage}")
+    tracker = StageTracker()
 
     try:
         load_dotenv(DEFAULT_ENV_FILE, override=False)
         settings = load_settings()
         config = settings.require_generate_and_seal_config()
         live_supabase = settings.require_live_supabase_control_plane_config()
-        passed("configuration_validation")
+        tracker.begin("dependency_construction")
         print("NOTICE: one real OpenAI image generation may incur provider cost.")
 
         capture = Capture(
@@ -171,7 +225,8 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 api_key=config.openai_api_key.get_secret_value(),
                 timeout_seconds=config.generation_timeout_seconds,
                 max_image_bytes=config.max_generated_image_bytes,
-            )
+            ),
+            tracker.begin,
         )
 
         def assets_factory() -> Any:
@@ -192,12 +247,12 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 "vault_client_factory": vault_factory,
                 "custody_executor": capture.custody_executor,
                 "sealed_uploader": capture.sealed_uploader,
+                "stage_callback": tracker.begin,
             },
         )
         service = runtime.generate_and_seal_service
         if service is None:
             raise LiveSmokeError("PRODUCTION_SERVICE_UNAVAILABLE")
-        passed("dependency_construction")
         result = service.generate_and_seal(
             GenerateAndSealRequest(
                 prompt=(
@@ -209,30 +264,22 @@ def run_live(report_path: Path, *, force: bool) -> int:
         )
         if capture.provider_calls != 1 or capture.image is None or not capture.image.ai_generated:
             raise LiveSmokeError("EXACTLY_ONE_AI_GENERATION_REQUIRED")
-        passed("provider_generation")
         if sha256_bytes(capture.image.data) != result.source_sha256:
             raise LiveSmokeError("SOURCE_HASH_MISMATCH")
-        passed("source_hash")
         if capture.manifest_bytes is None or result.canonical_hash.encode() not in capture.manifest_bytes:
             raise LiveSmokeError("PRIVATE_MANIFEST_INVALID")
-        passed("genblaze_manifest")
-        passed("canonical_hash")
         if capture.sealed_bytes is None:
             raise LiveSmokeError("SEALED_BYTES_UNAVAILABLE")
         capsule = extract_public_capsule_png(capture.sealed_bytes)
-        passed("public_capsule_embedding")
         if sha256_bytes(capture.sealed_bytes) != result.sealed_sha256:
             raise LiveSmokeError("SEALED_HASH_MISMATCH")
-        passed("sealed_hash")
         certificate = runtime.repository.get_certificate(result.cert_id)
         if certificate is None or not verify_signed_envelope(
             certificate.signed_envelope, certificate.signer_public_key_b64
         ):
             raise LiveSmokeError("ENVELOPE_SIGNATURE_INVALID")
-        passed("envelope_signature")
         if capture.custody is None or not capture.custody.custody_verified:
             raise LiveSmokeError("VAULT_CUSTODY_INVALID")
-        passed("vault_custody")
         if capture.sealed is None or capture.sealed.version_id is None:
             raise LiveSmokeError("SEALED_UPLOAD_INVALID")
         download_bytes_verified(
@@ -243,9 +290,8 @@ def run_live(report_path: Path, *, force: bool) -> int:
             version_id=capture.sealed.version_id,
             max_bytes=config.max_generated_image_bytes,
         )
-        passed("sealed_asset_upload")
-        passed("supabase_registration")
 
+        tracker.begin("public_certificate_projection")
         from supabase import create_client
 
         public_client = create_client(config.supabase.url, live_supabase.publishable_key)
@@ -254,8 +300,8 @@ def run_live(report_path: Path, *, force: bool) -> int:
         ).execute()
         if not projection.data:
             raise LiveSmokeError("PUBLIC_PROJECTION_MISSING")
-        passed("public_certificate_projection")
 
+        tracker.begin("verify_gate")
         from fastapi.testclient import TestClient
 
         app = create_app(
@@ -271,7 +317,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
         )
         if verify.status_code != 200 or not verify.json().get("verified"):
             raise LiveSmokeError("VERIFY_GATE_FAILED")
-        passed("verify_gate")
+        tracker.begin("delivery_authorization")
         delivery = client.post(
             f"/v1/delivery/{result.cert_id}",
             json={"presented_sha256": result.sealed_sha256},
@@ -284,7 +330,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
         raw_url = delivery.json().get("download_url")
         if not isinstance(raw_url, str):
             raise LiveSmokeError("DELIVERY_URL_MISSING")
-        passed("delivery_authorization")
+        tracker.begin("delivered_byte_integrity")
         delivered = _download_delivery(
             raw_url,
             max_bytes=config.max_generated_image_bytes,
@@ -292,11 +338,11 @@ def run_live(report_path: Path, *, force: bool) -> int:
         )
         if sha256_bytes(delivered) != result.sealed_sha256:
             raise LiveSmokeError("DELIVERED_HASH_MISMATCH")
-        passed("delivered_byte_integrity")
+        tracker.begin("embedded_capsule_verification")
         if extract_public_capsule_png(delivered) != capsule:
             raise LiveSmokeError("DELIVERED_CAPSULE_MISMATCH")
-        passed("embedded_capsule_verification")
 
+        tracker.begin("database_secret_scan")
         secret_values = [
             config.openai_api_key.get_secret_value(),
             config.admin_api_key.get_secret_value(),
@@ -309,7 +355,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
             config.b2.vault.app_key.get_secret_value(),
         ]
         _database_secret_scan(runtime.repository, result, secret_values)
-        passed("database_secret_scan")
+        tracker.begin("safe_report")
         report = {
             "schema_version": "firemark.generate-and-seal-report.v1",
             "package_versions": {
@@ -341,13 +387,13 @@ def run_live(report_path: Path, *, force: bool) -> int:
             "production_generation_evidence": True,
             "production_b2_custody_evidence": True,
             "production_supabase_evidence": True,
-            "stages": completed + [{"stage": "safe_report", "status": "PASS"}],
+            "stages": tracker.completed + [{"stage": "safe_report", "status": "PASS"}],
         }
         _write_report(report_path, report, force=force)
-        passed("safe_report")
+        tracker.complete_current()
         return 0
-    except Exception:
-        print(f"FAIL: {current_stage} (LIVE_CHECKPOINT_FAILED)")
+    except Exception as exc:
+        tracker.fail(exc)
         return 1
 
 

@@ -133,6 +133,18 @@ class GenerateAndSealConfig(BaseModel):
     supabase: SupabaseConfig
 
 
+class OpenAIImageConfig(BaseModel):
+    """OpenAI-only image generation configuration for an isolated checkpoint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    api_key: SecretStr
+    model: str
+    size: str
+    timeout_seconds: int
+    max_image_bytes: int
+
+
 class Settings(BaseModel):
     """Typed configuration without import-time credential requirements."""
 
@@ -556,6 +568,18 @@ class Settings(BaseModel):
             public_base_url=self.public_base_url,
             b2=self.require_complete_b2_config(),
             supabase=self.require_supabase_config(),
+        )
+
+    def require_openai_image_config(self) -> OpenAIImageConfig:
+        """Require only the settings needed for one OpenAI image request."""
+        if self.openai_api_key is None:
+            raise ValueError("OPENAI_API_KEY is required")
+        return OpenAIImageConfig(
+            api_key=self.openai_api_key,
+            model=self.openai_image_model,
+            size=self.openai_image_size,
+            timeout_seconds=self.generation_timeout_seconds,
+            max_image_bytes=self.max_generated_image_bytes,
         )
 
 

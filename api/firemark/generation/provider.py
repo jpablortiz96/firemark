@@ -8,12 +8,17 @@ from api.firemark.generation.models import GeneratedImage, GenerationRequest
 
 ProviderFailureCode = Literal[
     "authentication",
+    "permission_denied",
+    "quota_or_billing",
     "rate_limit",
     "invalid_request",
+    "model_or_size_unsupported",
     "safety_rejection",
     "timeout",
     "unavailable",
     "malformed_response",
+    "non_png_response",
+    "response_too_large",
 ]
 
 

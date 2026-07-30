@@ -321,3 +321,20 @@ def test_environment_and_signing_configuration_remain_supported(
         Settings(signing_key="test", signing_key_file=private_path)
     with pytest.raises(ValidationError, match="FIREMARK_ENV"):
         Settings(environment="development")  # type: ignore[arg-type]
+
+
+def test_openai_only_configuration_requires_no_other_live_dependency() -> None:
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        Settings().require_openai_image_config()
+    config = Settings(
+        openai_api_key="test-openai-key",
+        openai_image_model="gpt-image-test",
+        openai_image_size="1024x1024",
+        generation_timeout_seconds=45,
+        max_generated_image_bytes=2 * 1024 * 1024,
+    ).require_openai_image_config()
+    assert config.api_key.get_secret_value() == "test-openai-key"
+    assert config.model == "gpt-image-test"
+    assert config.size == "1024x1024"
+    assert config.timeout_seconds == 45
+    assert config.max_image_bytes == 2 * 1024 * 1024
