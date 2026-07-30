@@ -204,9 +204,12 @@ FIREMARK_PUBLIC_BASE_URL=
 FIREMARK_DELIVERY_TTL_SECONDS=
 ```
 
-The publishable key must be an `sb_publishable_` key and the backend key must be a distinct
-`sb_secret_` key. Do not place the backend key in a browser, public certificate, log, fixture, or
-committed file.
+Prefer a current `sb_publishable_` public key and a distinct current `sb_secret_` backend key.
+Legacy Supabase JWT keys remain compatible only when their embedded role is respectively `anon` or
+`service_role`; role-mismatched and unknown key families fail closed. Do not place the backend key
+in a browser, public certificate, log, fixture, or committed file.
+Configuration failures print only field status, safe reason codes, URL hostnames, and key-family
+labels; they never print credential values, JWT claims, or complete URLs.
 
 Review the zero-network behavior first, then let a single owner run the live checkpoint:
 
@@ -226,7 +229,7 @@ headers, and URLs.
 
 The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
 The settings loader reads process environment variables explicitly; it does not automatically load
-the `.env` file. Only the explicitly live B2 smoke command loads the ignored repository `.env`.
+the `.env` file. Only explicitly live CLI checkpoints load the ignored repository `.env`.
 
 Configure two private buckets locally by copying `.env.example` to `.env`. The vault bucket must
 have Object Lock enabled when it is created. Use one-day retention only for a deliberate

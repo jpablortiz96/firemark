@@ -233,6 +233,82 @@ def test_live_configuration_rejects_partial_http_and_identical_keys() -> None:
         smoke.run_checkpoint(identical, client_factory=lambda *_: object())
 
 
+def test_cli_loads_dotenv_before_live_settings_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    order: list[str] = []
+
+    def fake_load_dotenv(*, dotenv_path: Path, override: bool) -> bool:
+        assert dotenv_path == env_file
+        assert override is False
+        order.append("dotenv")
+        return True
+
+    def fake_load_settings() -> Settings:
+        order.append("settings")
+        assert order == ["dotenv", "settings"]
+        return live_settings()
+
+    def fake_run_checkpoint(settings: Settings, **kwargs: Any) -> dict[str, Any]:
+        assert settings.require_live_supabase_control_plane_config()
+        assert kwargs["output_report"] is None
+        order.append("checkpoint")
+        return {"project_hostname": "project.supabase.co"}
+
+    monkeypatch.setattr(smoke, "DEFAULT_ENV_FILE", env_file)
+    monkeypatch.setattr(smoke, "load_dotenv", fake_load_dotenv)
+    monkeypatch.setattr(smoke, "load_settings", fake_load_settings)
+    monkeypatch.setattr(smoke, "run_checkpoint", fake_run_checkpoint)
+    assert smoke.main(["--live"]) == 0
+    assert order == ["dotenv", "settings", "checkpoint"]
+
+
+def test_safe_configuration_diagnostic_prints_only_status_and_key_families(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    publishable = "sb_publishable_must-never-print"
+    secret = "sb_secret_must-never-print"
+    query_token = "must-never-print-query-token"
+    values = {
+        "SUPABASE_URL": f"https://project.supabase.co?token={query_token}",
+        "SUPABASE_PUBLISHABLE_KEY": publishable,
+        "SUPABASE_SERVICE_ROLE_KEY": secret,
+        "FIREMARK_PUBLIC_BASE_URL": "https://firemark.local/",
+        "FIREMARK_DELIVERY_TTL_SECONDS": "300",
+    }
+    smoke.print_safe_configuration_diagnostic(values)
+    output = capsys.readouterr().out
+    assert "FIELD=SUPABASE_PUBLISHABLE_KEY PRESENT VALID" in output
+    assert "FAMILY=SB_PUBLISHABLE" in output
+    assert "FIELD=SUPABASE_SERVICE_ROLE_KEY PRESENT VALID" in output
+    assert "FAMILY=SB_SECRET" in output
+    assert "HOST=project.supabase.co" in output
+    assert "FIELD=FIREMARK_PUBLIC_BASE_URL PRESENT VALID" in output
+    assert publishable not in output
+    assert secret not in output
+    assert query_token not in output
+
+
+def test_safe_configuration_diagnostic_rejects_unknown_key_family() -> None:
+    lines = smoke.safe_configuration_diagnostic(
+        {
+            "SUPABASE_URL": "https://project.supabase.co",
+            "SUPABASE_PUBLISHABLE_KEY": "unknown-public-key",
+            "SUPABASE_SERVICE_ROLE_KEY": SECRET_KEY,
+            "FIREMARK_PUBLIC_BASE_URL": "https://firemark.local",
+            "FIREMARK_DELIVERY_TTL_SECONDS": "300",
+        }
+    )
+    assert any(
+        "FIELD=SUPABASE_PUBLISHABLE_KEY PRESENT INVALID "
+        "REASON=UNSUPPORTED_KEY_FAMILY FAMILY=UNKNOWN" == line
+        for line in lines
+    )
+
+
 def test_rls_classification_accepts_empty_or_denied_and_rejects_leaks() -> None:
     assert smoke.classify_rls_probe(SimpleNamespace(data=[])) == "empty_rls_result"
     assert smoke.classify_rls_probe(error=FakeServiceError("42501")) == (

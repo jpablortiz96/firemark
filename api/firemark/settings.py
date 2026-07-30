@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
+import json
 import os
 import re
 from pathlib import Path
@@ -12,7 +15,45 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator, model_validator
 
 Environment = Literal["local", "test", "staging", "production"]
+SupabaseKeyFamily = Literal[
+    "SB_PUBLISHABLE",
+    "SB_SECRET",
+    "LEGACY_ANON_JWT",
+    "LEGACY_SERVICE_ROLE_JWT",
+    "UNKNOWN",
+]
 _BUCKET_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{4,48}[A-Za-z0-9]$")
+
+
+def classify_supabase_key(value: str | None) -> SupabaseKeyFamily:
+    """Classify a Supabase key family without exposing or authenticating its contents."""
+    if value is None:
+        return "UNKNOWN"
+    if value.startswith("sb_publishable_"):
+        return "SB_PUBLISHABLE"
+    if value.startswith("sb_secret_"):
+        return "SB_SECRET"
+    parts = value.split(".")
+    if len(parts) != 3 or not value.startswith("eyJ"):
+        return "UNKNOWN"
+    try:
+        padding = "=" * (-len(parts[1]) % 4)
+        payload_bytes = base64.b64decode(
+            parts[1] + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(payload_bytes)
+    except (ValueError, UnicodeDecodeError, binascii.Error, json.JSONDecodeError):
+        return "UNKNOWN"
+    if not isinstance(payload, dict):
+        return "UNKNOWN"
+    role = payload.get("role")
+    if role == "anon":
+        return "LEGACY_ANON_JWT"
+    if role == "service_role":
+        return "LEGACY_SERVICE_ROLE_JWT"
+    return "UNKNOWN"
 
 
 class B2AssetsConfig(BaseModel):
@@ -341,10 +382,12 @@ class Settings(BaseModel):
         service_key = self.supabase_service_role_key.get_secret_value()
         if hmac.compare_digest(self.supabase_publishable_key, service_key):
             raise ValueError("Supabase publishable and backend secret keys must be different")
-        if not self.supabase_publishable_key.startswith("sb_publishable_"):
-            raise ValueError("SUPABASE_PUBLISHABLE_KEY must be a publishable key")
-        if not service_key.startswith("sb_secret_"):
-            raise ValueError("SUPABASE_SERVICE_ROLE_KEY must be an sb_secret_ backend key")
+        publishable_family = classify_supabase_key(self.supabase_publishable_key)
+        service_family = classify_supabase_key(service_key)
+        if publishable_family not in {"SB_PUBLISHABLE", "LEGACY_ANON_JWT"}:
+            raise ValueError("SUPABASE_PUBLISHABLE_KEY has an unsupported key family")
+        if service_family not in {"SB_SECRET", "LEGACY_SERVICE_ROLE_JWT"}:
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY has an unsupported backend key family")
         return LiveSupabaseControlPlaneConfig(
             url=self.supabase_url,
             publishable_key=self.supabase_publishable_key,

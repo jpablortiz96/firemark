@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import importlib.metadata
 import json
 import os
@@ -30,7 +31,12 @@ from api.firemark.control_plane.service import CertificateService
 from api.firemark.control_plane.supabase_repository import SupabaseCertificateRepository
 from api.firemark.custody import B2CustodyReceipt, LockedObjectReceipt, StoredObjectReceipt
 from api.firemark.seal_envelope import SealEnvelopeV1, sign_envelope
-from api.firemark.settings import LiveSupabaseControlPlaneConfig, Settings, load_settings
+from api.firemark.settings import (
+    LiveSupabaseControlPlaneConfig,
+    Settings,
+    classify_supabase_key,
+    load_settings,
+)
 from api.firemark.signer import Ed25519Signer
 
 DEFAULT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
@@ -140,6 +146,13 @@ STAGES = (
     "database_secret_scan",
     "write_safe_report",
 )
+LIVE_ENVIRONMENT_FIELDS = (
+    "SUPABASE_URL",
+    "SUPABASE_PUBLISHABLE_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "FIREMARK_PUBLIC_BASE_URL",
+    "FIREMARK_DELIVERY_TTL_SECONDS",
+)
 
 ClientFactory = Callable[[str, str], Any]
 
@@ -192,6 +205,91 @@ def _default_client_factory(url: str, key: str) -> Any:
     from supabase import create_client
 
     return create_client(url, key)
+
+
+def _safe_url_diagnostic(field: str, value: str | None) -> str:
+    if value in (None, ""):
+        return f"FIELD={field} MISSING INVALID REASON=REQUIRED_VALUE_MISSING HOST=NONE"
+    parsed = urlsplit(value)
+    hostname = parsed.hostname or "NONE"
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        reason = "HTTPS_ORIGIN_INVALID"
+    elif parsed.username or parsed.password:
+        reason = "URL_CREDENTIALS_PRESENT"
+    elif parsed.query or parsed.fragment:
+        reason = "URL_METADATA_PRESENT"
+    elif parsed.path not in ("", "/"):
+        reason = "URL_PATH_PRESENT"
+    else:
+        return f"FIELD={field} PRESENT VALID REASON=HTTPS_ORIGIN_VALID HOST={hostname}"
+    return f"FIELD={field} PRESENT INVALID REASON={reason} HOST={hostname}"
+
+
+def safe_configuration_diagnostic(values: Mapping[str, str | None]) -> tuple[str, ...]:
+    """Return only allowlisted configuration status; never return credential values."""
+    lines = [
+        _safe_url_diagnostic("SUPABASE_URL", values.get("SUPABASE_URL")),
+    ]
+    publishable = values.get("SUPABASE_PUBLISHABLE_KEY")
+    service = values.get("SUPABASE_SERVICE_ROLE_KEY")
+    distinct = not (
+        publishable not in (None, "")
+        and service not in (None, "")
+        and hmac.compare_digest(publishable, service)
+    )
+    key_fields = (
+        (
+            "SUPABASE_PUBLISHABLE_KEY",
+            publishable,
+            {"SB_PUBLISHABLE", "LEGACY_ANON_JWT"},
+        ),
+        (
+            "SUPABASE_SERVICE_ROLE_KEY",
+            service,
+            {"SB_SECRET", "LEGACY_SERVICE_ROLE_JWT"},
+        ),
+    )
+    for field, value, accepted in key_fields:
+        family = classify_supabase_key(value)
+        if value in (None, ""):
+            lines.append(
+                f"FIELD={field} MISSING INVALID REASON=REQUIRED_VALUE_MISSING FAMILY={family}"
+            )
+        elif not distinct:
+            lines.append(f"FIELD={field} PRESENT INVALID REASON=KEYS_NOT_DISTINCT FAMILY={family}")
+        elif family not in accepted:
+            lines.append(
+                f"FIELD={field} PRESENT INVALID REASON=UNSUPPORTED_KEY_FAMILY FAMILY={family}"
+            )
+        else:
+            lines.append(f"FIELD={field} PRESENT VALID REASON=KEY_FAMILY_VALID FAMILY={family}")
+    lines.append(
+        _safe_url_diagnostic("FIREMARK_PUBLIC_BASE_URL", values.get("FIREMARK_PUBLIC_BASE_URL"))
+    )
+    ttl = values.get("FIREMARK_DELIVERY_TTL_SECONDS")
+    if ttl in (None, ""):
+        lines.append(
+            "FIELD=FIREMARK_DELIVERY_TTL_SECONDS MISSING INVALID "
+            "REASON=REQUIRED_VALUE_MISSING"
+        )
+    else:
+        try:
+            valid_ttl = 60 <= int(ttl) <= 900
+        except ValueError:
+            valid_ttl = False
+        status = "VALID REASON=TTL_IN_RANGE" if valid_ttl else "INVALID REASON=TTL_INVALID"
+        lines.append(f"FIELD=FIREMARK_DELIVERY_TTL_SECONDS PRESENT {status}")
+    return tuple(lines)
+
+
+def print_safe_configuration_diagnostic(values: Mapping[str, str | None]) -> None:
+    """Print the redacted live-configuration diagnostic."""
+    for line in safe_configuration_diagnostic(values):
+        print(line)
+
+
+def _live_environment_values() -> dict[str, str | None]:
+    return {field: os.getenv(field) for field in LIVE_ENVIRONMENT_FIELDS}
 
 
 def _execute(builder: Any, stage: str, reason_code: str) -> Any:
@@ -821,8 +919,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (LiveCheckpointError, ValidationError) as exc:
         if isinstance(exc, LiveCheckpointError):
             print(f"FAIL: {exc.stage} ({exc.reason_code})")
+            if exc.stage == "configuration_validation":
+                print_safe_configuration_diagnostic(_live_environment_values())
         else:
             print("FAIL: configuration_validation (INVALID_LIVE_CONFIGURATION)")
+            print_safe_configuration_diagnostic(_live_environment_values())
         return 1
     except Exception:
         print("FAIL: checkpoint_internal (SAFE_UNEXPECTED_FAILURE)")

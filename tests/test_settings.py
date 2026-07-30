@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr, ValidationError
 
-from api.firemark.settings import Settings, load_settings
+from api.firemark.settings import Settings, classify_supabase_key, load_settings
 
 ENVIRONMENT_VARIABLES = (
     "FIREMARK_ENV",
@@ -59,6 +61,14 @@ def complete_values() -> dict[str, object]:
         "vault_retention_days": 90,
         "presigned_url_ttl_seconds": 300,
     }
+
+
+def legacy_supabase_jwt(role: str) -> str:
+    def encode(value: dict[str, str]) -> str:
+        data = json.dumps(value, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    return f"{encode({'alg': 'HS256', 'typ': 'JWT'})}.{encode({'role': role})}.test-signature"
 
 
 def test_defaults_allow_zero_network_imports_without_credentials() -> None:
@@ -205,6 +215,36 @@ def test_complete_live_supabase_configuration_is_explicit_and_separated(
     assert "sb_secret_test-value" not in repr(config)
 
 
+@pytest.mark.parametrize(
+    ("value", "family"),
+    [
+        ("sb_publishable_test-value", "SB_PUBLISHABLE"),
+        ("sb_secret_test-value", "SB_SECRET"),
+        (legacy_supabase_jwt("anon"), "LEGACY_ANON_JWT"),
+        (legacy_supabase_jwt("service_role"), "LEGACY_SERVICE_ROLE_JWT"),
+        (legacy_supabase_jwt("authenticated"), "UNKNOWN"),
+        ("unknown-key-family", "UNKNOWN"),
+    ],
+)
+def test_supabase_key_families_are_classified_intentionally(value: str, family: str) -> None:
+    assert classify_supabase_key(value) == family
+
+
+def test_legacy_anon_and_service_role_pair_remains_supported() -> None:
+    config = Settings(
+        supabase_url="https://project.supabase.co",
+        supabase_publishable_key=legacy_supabase_jwt("anon"),
+        supabase_service_role_key=legacy_supabase_jwt("service_role"),
+        public_base_url="https://firemark.local",
+        delivery_ttl_seconds=300,
+    ).require_live_supabase_control_plane_config()
+    assert classify_supabase_key(config.publishable_key) == "LEGACY_ANON_JWT"
+    assert classify_supabase_key(config.service_role_key.get_secret_value()) == (
+        "LEGACY_SERVICE_ROLE_JWT"
+    )
+    assert config.public_base_url == "https://firemark.local"
+
+
 def test_live_supabase_configuration_rejects_missing_explicit_values() -> None:
     settings = Settings(
         supabase_url="https://project.supabase.co",
@@ -228,17 +268,29 @@ def test_live_supabase_configuration_rejects_identical_or_confused_keys() -> Non
             supabase_publishable_key="same-key",
             supabase_service_role_key="same-key",
         ).require_live_supabase_control_plane_config()
-    with pytest.raises(ValueError, match="publishable key"):
+    with pytest.raises(ValueError, match="unsupported key family"):
         Settings(
             **common,
             supabase_publishable_key="not-a-publishable-key",
             supabase_service_role_key="sb_secret_test-value",
         ).require_live_supabase_control_plane_config()
-    with pytest.raises(ValueError, match="sb_secret_"):
+    with pytest.raises(ValueError, match="unsupported backend key family"):
         Settings(
             **common,
             supabase_publishable_key="sb_publishable_test-value",
             supabase_service_role_key="legacy-secret",
+        ).require_live_supabase_control_plane_config()
+    with pytest.raises(ValueError, match="unsupported key family"):
+        Settings(
+            **common,
+            supabase_publishable_key=legacy_supabase_jwt("service_role"),
+            supabase_service_role_key="sb_secret_test-value",
+        ).require_live_supabase_control_plane_config()
+    with pytest.raises(ValueError, match="unsupported backend key family"):
+        Settings(
+            **common,
+            supabase_publishable_key="sb_publishable_test-value",
+            supabase_service_role_key=legacy_supabase_jwt("anon"),
         ).require_live_supabase_control_plane_config()
 
 
