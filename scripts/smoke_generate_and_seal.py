@@ -17,14 +17,21 @@ from dotenv import load_dotenv
 
 from api.firemark.app import create_app
 from api.firemark.b2_storage import (
+    B2Error,
+    classify_b2_failure,
     create_assets_client,
     create_vault_client,
-    download_bytes_verified,
+    delete_unlocked_version_verified,
     upload_bytes_verified,
 )
 from api.firemark.bootstrap import build_runtime
 from api.firemark.control_plane.service import B2DeliveryStorage
-from api.firemark.custody import B2CustodyReceipt, StoredObjectReceipt, execute_b2_custody
+from api.firemark.custody import (
+    B2CustodyReceipt,
+    B2CustodyWorkflowError,
+    StoredObjectReceipt,
+    execute_b2_custody,
+)
 from api.firemark.generate_and_seal import GenerateAndSealRequest
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
 from api.firemark.generation.openai_provider import OpenAIImageProvider
@@ -48,9 +55,16 @@ STAGES = (
     "canonical_hash",
     "public_capsule_embedding",
     "sealed_hash",
-    "envelope_signature",
-    "vault_custody",
+    "vault_source_upload",
+    "vault_source_hash_verification",
+    "vault_source_retention_verification",
+    "vault_manifest_upload",
+    "vault_manifest_hash_verification",
+    "vault_manifest_retention_verification",
     "sealed_asset_upload",
+    "sealed_asset_hash_verification",
+    "custody_receipt_construction",
+    "envelope_signature",
     "supabase_registration",
     "public_certificate_projection",
     "verify_gate",
@@ -104,10 +118,27 @@ class StageTracker:
         print(f"PASS: {self.current}")
 
     def fail(self, exc: Exception) -> None:
+        if isinstance(exc, B2CustodyWorkflowError) and exc.stage in STAGES:
+            self.current = exc.stage
         provider_code = exc.code if isinstance(exc, GenerationProviderError) else None
+        b2_category: str | None = None
+        b2_code: str | None = None
+        bucket_role: str | None = None
+        object_kind: str | None = None
+        if isinstance(exc, B2CustodyWorkflowError):
+            b2_category = exc.category
+            b2_code = exc.service_error_code
+            bucket_role = exc.bucket_role
+            object_kind = exc.object_kind
+        elif isinstance(exc, B2Error):
+            failure = classify_b2_failure(exc, stage=self.current)
+            b2_category = failure.category
+            b2_code = failure.service_error_code
         category = (
             _PROVIDER_CATEGORIES.get(provider_code, "UNKNOWN_SAFE_ERROR")
             if provider_code is not None
+            else b2_category
+            if b2_category is not None
             else "CONFIGURATION_ERROR"
             if self.current == "configuration_validation"
             else "LOCAL_ADAPTER_ERROR"
@@ -115,7 +146,21 @@ class StageTracker:
             else "UNKNOWN_SAFE_ERROR"
         )
         suffix = f", PROVIDER_CODE={provider_code}" if provider_code is not None else ""
+        if b2_code is not None:
+            suffix += f", B2_CODE={b2_code}"
+        if bucket_role is not None:
+            suffix += f", BUCKET_ROLE={bucket_role}"
+        if object_kind is not None:
+            suffix += f", OBJECT_KIND={object_kind}"
         print(f"FAIL: {self.current} (CATEGORY={category}{suffix})")
+        if isinstance(exc, B2CustodyWorkflowError):
+            for item in exc.partial_objects:
+                version = item.version_id or "MISSING"
+                print(
+                    "PARTIAL: "
+                    f"BUCKET_ROLE={item.bucket_role}, OBJECT_KIND={item.object_kind}, "
+                    f"KEY={item.key}, VERSION_ID={version}, RETAINED={str(item.retained).lower()}"
+                )
 
 
 class Capture:
@@ -211,6 +256,7 @@ def _database_secret_scan(repository: Any, result: Any, secrets: Sequence[str]) 
 
 def run_live(report_path: Path, *, force: bool) -> int:
     tracker = StageTracker()
+    capture: Capture | None = None
 
     try:
         load_dotenv(DEFAULT_ENV_FILE, override=False)
@@ -282,15 +328,6 @@ def run_live(report_path: Path, *, force: bool) -> int:
             raise LiveSmokeError("VAULT_CUSTODY_INVALID")
         if capture.sealed is None or capture.sealed.version_id is None:
             raise LiveSmokeError("SEALED_UPLOAD_INVALID")
-        download_bytes_verified(
-            capture.assets_client,
-            bucket=capture.sealed.bucket,
-            key=capture.sealed.key,
-            expected_sha256=result.sealed_sha256,
-            version_id=capture.sealed.version_id,
-            max_bytes=config.max_generated_image_bytes,
-        )
-
         tracker.begin("public_certificate_projection")
         from supabase import create_client
 
@@ -393,6 +430,18 @@ def run_live(report_path: Path, *, force: bool) -> int:
         tracker.complete_current()
         return 0
     except Exception as exc:
+        if capture is not None and capture.sealed is not None and capture.assets_client is not None:
+            try:
+                delete_unlocked_version_verified(
+                    capture.assets_client,
+                    bucket=capture.sealed.bucket,
+                    key=capture.sealed.key,
+                    version_id=capture.sealed.version_id,
+                    expected_sha256=capture.sealed.sha256,
+                    known_unlocked=True,
+                )
+            except B2Error:
+                pass
         tracker.fail(exc)
         return 1
 

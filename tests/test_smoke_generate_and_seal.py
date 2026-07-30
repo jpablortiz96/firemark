@@ -42,9 +42,16 @@ def test_help_contract_and_exact_live_stage_list() -> None:
         "canonical_hash",
         "public_capsule_embedding",
         "sealed_hash",
-        "envelope_signature",
-        "vault_custody",
+        "vault_source_upload",
+        "vault_source_hash_verification",
+        "vault_source_retention_verification",
+        "vault_manifest_upload",
+        "vault_manifest_hash_verification",
+        "vault_manifest_retention_verification",
         "sealed_asset_upload",
+        "sealed_asset_hash_verification",
+        "custody_receipt_construction",
+        "envelope_signature",
         "supabase_registration",
         "public_certificate_projection",
         "verify_gate",
@@ -165,3 +172,36 @@ def test_full_smoke_failure_keeps_exact_provider_stage_and_safe_code(
         "(CATEGORY=AUTHENTICATION_FAILURE, PROVIDER_CODE=authentication)\n"
     )
     assert "private-openai-value" not in output
+
+
+def test_full_smoke_preserves_exact_b2_stage_category_and_partial_versions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from api.firemark.custody import B2CustodyWorkflowError, PartialB2Object
+
+    tracker = smoke.StageTracker()
+    tracker.begin("dependency_construction")
+    error = B2CustodyWorkflowError(
+        "private raw service failure",
+        stage="vault_manifest_hash_verification",
+        category="HASH_MISMATCH",
+        service_error_code="BadDigest",
+        bucket_role="vault",
+        object_kind="manifest",
+        partial_objects=(
+            PartialB2Object(
+                "vault",
+                "source",
+                "vault/sources/safe.png",
+                "source-version-exact",
+                True,
+            ),
+        ),
+    )
+    tracker.fail(error)
+    output = capsys.readouterr().out
+    assert "FAIL: vault_manifest_hash_verification" in output
+    assert "CATEGORY=HASH_MISMATCH" in output
+    assert "B2_CODE=BadDigest" in output
+    assert "VERSION_ID=source-version-exact" in output
+    assert "private raw service failure" not in output

@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 import boto3  # type: ignore[import-untyped]
@@ -63,6 +63,18 @@ class B2ConfigurationError(B2Error):
     """Raised before an unsafe or incomplete B2 operation."""
 
 
+class B2InvalidMetadataError(B2ConfigurationError):
+    """Raised before metadata outside the safe S3 subset can be sent."""
+
+
+class B2InvalidObjectBodyError(B2ConfigurationError):
+    """Raised before an unsupported object body can be sent."""
+
+
+class B2VersionIdError(B2ConfigurationError):
+    """Raised when exact-version evidence is absent."""
+
+
 class B2OperationError(B2Error):
     """Raised for a safely classified B2 service or transport failure."""
 
@@ -85,6 +97,113 @@ class B2DeleteProofError(B2Error):
 
 class B2CleanupError(B2Error):
     """Raised when an exact unlocked object version cannot be proven absent."""
+
+
+class B2PersistedObjectError(B2Error):
+    """A failed verification that may have left one exact uploaded version."""
+
+    def __init__(self, *, key: str, version_id: str, retained: bool) -> None:
+        super().__init__("B2 verification failed after an exact version was uploaded")
+        self.key = key
+        self.version_id = version_id
+        self.retained = retained
+
+
+B2SafeCategory = Literal[
+    "CONFIGURATION_ERROR",
+    "CLIENT_CONSTRUCTION_ERROR",
+    "AUTHENTICATION_FAILURE",
+    "PERMISSION_DENIED",
+    "BUCKET_NOT_FOUND",
+    "OBJECT_LOCK_DISABLED",
+    "RETENTION_REJECTED",
+    "INVALID_METADATA",
+    "INVALID_OBJECT_BODY",
+    "UPLOAD_FAILURE",
+    "HASH_MISMATCH",
+    "VERSION_ID_MISSING",
+    "RETENTION_VERIFICATION_FAILURE",
+    "STORAGE_READBACK_FAILURE",
+    "NETWORK_FAILURE",
+    "PROVIDER_UNAVAILABLE",
+    "LOCAL_ADAPTER_ERROR",
+    "UNKNOWN_SAFE_ERROR",
+]
+
+
+@dataclass(frozen=True)
+class B2FailureInfo:
+    """Allowlisted failure data safe for checkpoint output."""
+
+    category: B2SafeCategory
+    service_error_code: str | None = None
+
+
+def classify_b2_failure(exc: BaseException, *, stage: str = "") -> B2FailureInfo:
+    """Classify a wrapped boto/B2 failure without rendering its raw message."""
+    current: BaseException | None = exc
+    service_code: str | None = None
+    transport = False
+    classified: BaseException = exc
+    while current is not None:
+        if isinstance(current, ClientError):
+            service_code = _service_code(current)
+            break
+        if isinstance(current, BotoCoreError):
+            transport = True
+        if isinstance(
+            current,
+            (
+                B2IntegrityError,
+                B2RetentionError,
+                B2InvalidMetadataError,
+                B2InvalidObjectBodyError,
+                B2VersionIdError,
+                B2OperationError,
+            ),
+        ):
+            classified = current
+        current = current.__cause__
+    if service_code in {"InvalidAccessKeyId", "InvalidToken", "SignatureDoesNotMatch"}:
+        return B2FailureInfo("AUTHENTICATION_FAILURE", service_code)
+    if service_code in {"AccessDenied", "Unauthorized"}:
+        return B2FailureInfo("PERMISSION_DENIED", service_code)
+    if service_code in {"NoSuchBucket", "404"}:
+        return B2FailureInfo("BUCKET_NOT_FOUND", service_code)
+    if service_code in {
+        "InvalidBucketState",
+        "ObjectLockConfigurationNotFoundError",
+        "ObjectLockDisabled",
+    }:
+        return B2FailureInfo("OBJECT_LOCK_DISABLED", service_code)
+    if service_code in {"InvalidArgument", "InvalidMetadata", "MetadataTooLarge"}:
+        return B2FailureInfo("INVALID_METADATA", service_code)
+    if service_code in {"BadDigest", "InvalidDigest", "InvalidRequestBody"}:
+        return B2FailureInfo("INVALID_OBJECT_BODY", service_code)
+    if service_code == "InvalidRequest" and (
+        "retention" in stage or stage.startswith("vault_") and stage.endswith("_upload")
+    ):
+        return B2FailureInfo("RETENTION_REJECTED", service_code)
+    if isinstance(classified, B2IntegrityError):
+        return B2FailureInfo("HASH_MISMATCH", service_code)
+    if isinstance(classified, B2RetentionError):
+        return B2FailureInfo("RETENTION_VERIFICATION_FAILURE", service_code)
+    if isinstance(classified, B2InvalidMetadataError):
+        return B2FailureInfo("INVALID_METADATA", service_code)
+    if isinstance(classified, B2InvalidObjectBodyError):
+        return B2FailureInfo("INVALID_OBJECT_BODY", service_code)
+    if isinstance(classified, B2VersionIdError):
+        return B2FailureInfo("VERSION_ID_MISSING", service_code)
+    if isinstance(classified, B2ConfigurationError):
+        return B2FailureInfo("CONFIGURATION_ERROR", service_code)
+    if transport:
+        return B2FailureInfo("NETWORK_FAILURE", service_code)
+    if isinstance(classified, B2OperationError):
+        category: B2SafeCategory = (
+            "UPLOAD_FAILURE" if "upload" in stage else "STORAGE_READBACK_FAILURE"
+        )
+        return B2FailureInfo(category, service_code)
+    return B2FailureInfo("UNKNOWN_SAFE_ERROR", service_code)
 
 
 class S3Client(Protocol):
@@ -316,10 +435,10 @@ def _safe_metadata(metadata: Mapping[str, str] | None, digest: str) -> dict[str,
     result = dict(metadata or {})
     result["firemark-sha256"] = digest
     if not set(result) <= _METADATA_KEYS:
-        raise B2ConfigurationError("Object metadata contains a non-allowlisted key")
+        raise B2InvalidMetadataError("Object metadata contains a non-allowlisted key")
     for key, value in result.items():
         if not isinstance(value, str) or not _METADATA_VALUE_PATTERN.fullmatch(value):
-            raise B2ConfigurationError(f"Object metadata value is unsafe for {key}")
+            raise B2InvalidMetadataError(f"Object metadata value is unsafe for {key}")
     return result
 
 
@@ -329,7 +448,7 @@ def _version_parameters(version_id: str | None) -> dict[str, str]:
 
 def _required_version_id(version_id: str | None) -> str:
     if not isinstance(version_id, str) or not version_id.strip():
-        raise B2ConfigurationError("An exact nonblank VersionId is required")
+        raise B2VersionIdError("An exact nonblank VersionId is required")
     return version_id
 
 
@@ -458,6 +577,8 @@ def _put_verified(
     content_type: str,
     metadata: Mapping[str, str] | None,
     known_unlocked: bool,
+    stage_callback: Callable[[str], None] | None = None,
+    hash_verification_stage: str | None = None,
 ) -> StoredObjectReceipt:
     digest = _validate_digest(expected_sha256)
     if not content_type.strip():
@@ -474,7 +595,11 @@ def _put_verified(
     except (BotoCoreError, ClientError) as exc:
         raise B2OperationError(_safe_operation_error("put_object", bucket, key)) from exc
     version_id = str(response["VersionId"]) if response.get("VersionId") else None
+    if version_id is None or not version_id.strip():
+        raise B2VersionIdError("Uploaded object requires an exact VersionId")
     try:
+        if stage_callback is not None and hash_verification_stage is not None:
+            stage_callback(hash_verification_stage)
         receipt = head_object_receipt(
             client,
             bucket=bucket,
@@ -493,7 +618,8 @@ def _put_verified(
             max_bytes=max(DEFAULT_MEMORY_LIMIT, size_bytes),
         )
         return receipt
-    except (B2IntegrityError, B2OperationError):
+    except (B2IntegrityError, B2OperationError) as verification_error:
+        cleanup_failed = False
         if known_unlocked:
             try:
                 delete_unlocked_object(
@@ -504,7 +630,11 @@ def _put_verified(
                     known_unlocked=True,
                 )
             except B2Error:
-                pass
+                cleanup_failed = True
+        if cleanup_failed:
+            raise B2PersistedObjectError(
+                key=key, version_id=version_id, retained=False
+            ) from verification_error
         raise
 
 
@@ -518,8 +648,13 @@ def upload_bytes_verified(
     content_type: str,
     metadata: Mapping[str, str] | None = None,
     known_unlocked: bool = False,
+    stage_callback: Callable[[str], None] | None = None,
+    upload_stage: str | None = None,
+    hash_verification_stage: str | None = None,
 ) -> StoredObjectReceipt:
     """Upload bytes, head them, download them, and verify their SHA-256."""
+    if stage_callback is not None and upload_stage is not None:
+        stage_callback(upload_stage)
     if sha256_bytes(data) != _validate_digest(expected_sha256):
         raise B2IntegrityError("Upload bytes do not match the expected SHA-256")
     return _put_verified(
@@ -532,6 +667,8 @@ def upload_bytes_verified(
         content_type=content_type,
         metadata=metadata,
         known_unlocked=known_unlocked,
+        stage_callback=stage_callback,
+        hash_verification_stage=hash_verification_stage,
     )
 
 
@@ -787,7 +924,14 @@ def _locked_receipt(
     version_id: str | None,
     etag: str | None,
     requested_retention: datetime,
+    stage_callback: Callable[[str], None] | None = None,
+    hash_verification_stage: str | None = None,
+    retention_verification_stage: str | None = None,
 ) -> LockedObjectReceipt:
+    if version_id is None or not version_id.strip():
+        raise B2VersionIdError("Locked upload requires an exact VersionId")
+    if stage_callback is not None and hash_verification_stage is not None:
+        stage_callback(hash_verification_stage)
     head = head_object_receipt(
         client,
         bucket=bucket,
@@ -797,14 +941,6 @@ def _locked_receipt(
     )
     if head is None or head.size_bytes != size_bytes:
         raise B2IntegrityError("Locked B2 object metadata did not verify")
-    state = read_object_retention(
-        client,
-        bucket=bucket,
-        key=key,
-        version_id=version_id,
-    )
-    if not _retention_covers(state.retain_until, requested_retention):
-        raise B2RetentionError("Confirmed retention is earlier than requested")
     download_bytes_verified(
         client,
         bucket=bucket,
@@ -813,6 +949,16 @@ def _locked_receipt(
         version_id=version_id,
         max_bytes=max(DEFAULT_MEMORY_LIMIT, size_bytes),
     )
+    if stage_callback is not None and retention_verification_stage is not None:
+        stage_callback(retention_verification_stage)
+    state = read_object_retention(
+        client,
+        bucket=bucket,
+        key=key,
+        version_id=version_id,
+    )
+    if not _retention_covers(state.retain_until, requested_retention):
+        raise B2RetentionError("Confirmed retention is earlier than requested")
     return LockedObjectReceipt(
         **head.model_dump(exclude={"version_id", "etag"}),
         version_id=version_id or head.version_id,
@@ -832,8 +978,14 @@ def upload_locked_bytes(
     content_type: str,
     retention_until: datetime,
     metadata: Mapping[str, str] | None = None,
+    stage_callback: Callable[[str], None] | None = None,
+    upload_stage: str | None = None,
+    hash_verification_stage: str | None = None,
+    retention_verification_stage: str | None = None,
 ) -> LockedObjectReceipt:
     """Write bytes with COMPLIANCE retention and verify both bytes and retention."""
+    if stage_callback is not None and upload_stage is not None:
+        stage_callback(upload_stage)
     digest = _validate_digest(expected_sha256)
     if sha256_bytes(data) != digest:
         raise B2IntegrityError("Locked upload bytes do not match the expected SHA-256")
@@ -853,17 +1005,27 @@ def upload_locked_bytes(
         raise B2OperationError(_safe_operation_error("locked put_object", bucket, key)) from exc
     version_id = str(response["VersionId"]) if response.get("VersionId") else None
     etag = str(response["ETag"]) if response.get("ETag") else None
-    return _locked_receipt(
-        client,
-        bucket=bucket,
-        key=key,
-        digest=digest,
-        content_type=content_type,
-        size_bytes=len(data),
-        version_id=version_id,
-        etag=etag,
-        requested_retention=requested,
-    )
+    try:
+        return _locked_receipt(
+            client,
+            bucket=bucket,
+            key=key,
+            digest=digest,
+            content_type=content_type,
+            size_bytes=len(data),
+            version_id=version_id,
+            etag=etag,
+            requested_retention=requested,
+            stage_callback=stage_callback,
+            hash_verification_stage=hash_verification_stage,
+            retention_verification_stage=retention_verification_stage,
+        )
+    except B2Error as exc:
+        if version_id is not None:
+            raise B2PersistedObjectError(
+                key=key, version_id=version_id, retained=True
+            ) from exc
+        raise
 
 
 def upload_locked_file(
@@ -876,8 +1038,14 @@ def upload_locked_file(
     content_type: str,
     retention_until: datetime,
     metadata: Mapping[str, str] | None = None,
+    stage_callback: Callable[[str], None] | None = None,
+    upload_stage: str | None = None,
+    hash_verification_stage: str | None = None,
+    retention_verification_stage: str | None = None,
 ) -> LockedObjectReceipt:
     """Stream a file into COMPLIANCE custody and verify the exact version."""
+    if stage_callback is not None and upload_stage is not None:
+        stage_callback(upload_stage)
     digest = _validate_digest(expected_sha256)
     if sha256_file(path) != digest:
         raise B2IntegrityError("Locked upload file does not match the expected SHA-256")
@@ -898,17 +1066,27 @@ def upload_locked_file(
         raise B2OperationError(_safe_operation_error("locked put_object", bucket, key)) from exc
     version_id = str(response["VersionId"]) if response.get("VersionId") else None
     etag = str(response["ETag"]) if response.get("ETag") else None
-    return _locked_receipt(
-        client,
-        bucket=bucket,
-        key=key,
-        digest=digest,
-        content_type=content_type,
-        size_bytes=path.stat().st_size,
-        version_id=version_id,
-        etag=etag,
-        requested_retention=requested,
-    )
+    try:
+        return _locked_receipt(
+            client,
+            bucket=bucket,
+            key=key,
+            digest=digest,
+            content_type=content_type,
+            size_bytes=path.stat().st_size,
+            version_id=version_id,
+            etag=etag,
+            requested_retention=requested,
+            stage_callback=stage_callback,
+            hash_verification_stage=hash_verification_stage,
+            retention_verification_stage=retention_verification_stage,
+        )
+    except B2Error as exc:
+        if version_id is not None:
+            raise B2PersistedObjectError(
+                key=key, version_id=version_id, retained=True
+            ) from exc
+        raise
 
 
 def prove_locked_delete_denial(

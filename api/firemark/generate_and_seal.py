@@ -310,7 +310,7 @@ class GenerateAndSealService:
             if hmac.compare_digest(source_sha256, sealed_sha256):
                 raise GenerateAndSealError("SEALED_HASH_UNCHANGED")
             retention_until = timestamp + timedelta(days=self.retention_days)
-            self._stage_callback("vault_custody")
+            self._stage_callback("vault_source_upload")
             assets_client = self.assets_client_factory()
             vault_client = self.vault_client_factory()
             with tempfile.TemporaryDirectory(prefix="firemark-generate-") as directory:
@@ -331,13 +331,8 @@ class GenerateAndSealService:
                     retention_until=retention_until,
                     source_content_type="image/png",
                     now=timestamp,
+                    stage_callback=self._stage_callback,
                 )
-            if not custody_receipt.custody_verified:
-                raise GenerateAndSealError("CUSTODY_NOT_VERIFIED")
-            vault_source_version = custody_receipt.vault_source.version_id
-            vault_manifest_version = custody_receipt.vault_manifest.version_id
-            if vault_source_version is None or vault_manifest_version is None:
-                raise GenerateAndSealError("CUSTODY_VERSION_UNAVAILABLE")
             self._stage_callback("sealed_asset_upload")
             sealed_key = sealed_asset_key(sealed_sha256)
             sealed_receipt = self.sealed_uploader(
@@ -353,11 +348,23 @@ class GenerateAndSealService:
                     "firemark-cert-id": cert_id,
                 },
                 known_unlocked=True,
+                stage_callback=self._stage_callback,
+                upload_stage="sealed_asset_upload",
+                hash_verification_stage="sealed_asset_hash_verification",
             )
             if sealed_receipt.version_id is None:
                 raise GenerateAndSealError(
                     "SEALED_VERSION_UNAVAILABLE", partial_keys=(sealed_key,)
                 )
+            self._stage_callback("custody_receipt_construction")
+            if sealed_receipt.sha256 != sealed_sha256:
+                raise GenerateAndSealError("SEALED_HASH_MISMATCH")
+            if not custody_receipt.custody_verified:
+                raise GenerateAndSealError("CUSTODY_NOT_VERIFIED")
+            vault_source_version = custody_receipt.vault_source.version_id
+            vault_manifest_version = custody_receipt.vault_manifest.version_id
+            if vault_source_version is None or vault_manifest_version is None:
+                raise GenerateAndSealError("CUSTODY_VERSION_UNAVAILABLE")
             self._stage_callback("envelope_signature")
             generation_run = GenerationRunRecord(
                 run_id=run_id,

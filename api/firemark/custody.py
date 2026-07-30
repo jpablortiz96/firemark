@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -189,9 +191,37 @@ class B2CustodyReceipt(BaseModel):
 class B2CustodyWorkflowError(RuntimeError):
     """Fail closed while retaining only safe partial-state locations."""
 
-    def __init__(self, message: str, *, partial_keys: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_keys: tuple[str, ...] = (),
+        stage: str | None = None,
+        category: str = "UNKNOWN_SAFE_ERROR",
+        service_error_code: str | None = None,
+        bucket_role: str | None = None,
+        object_kind: str | None = None,
+        partial_objects: tuple[PartialB2Object, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.partial_keys = partial_keys
+        self.stage = stage
+        self.category = category
+        self.service_error_code = service_error_code
+        self.bucket_role = bucket_role
+        self.object_kind = object_kind
+        self.partial_objects = partial_objects
+
+
+@dataclass(frozen=True)
+class PartialB2Object:
+    """Safe exact-version state retained after an interrupted custody workflow."""
+
+    bucket_role: Literal["assets", "vault"]
+    object_kind: Literal["source", "manifest", "sealed"]
+    key: str
+    version_id: str | None
+    retained: bool
 
 
 def execute_b2_custody(
@@ -211,11 +241,14 @@ def execute_b2_custody(
     source_content_type: str,
     manifest_content_type: str = "application/json",
     now: datetime | None = None,
+    stage_callback: Callable[[str], None] | None = None,
 ) -> B2CustodyReceipt:
     """Store and verify four objects without claiming cross-object atomicity."""
     from api.firemark.b2_storage import (
+        B2PersistedObjectError,
         assets_manifest_key,
         assets_source_key,
+        classify_b2_failure,
         delete_unlocked_version_verified,
         download_bytes_verified,
         head_object_receipt,
@@ -245,8 +278,21 @@ def execute_b2_custody(
     locked_manifest_key = vault_manifest_key(run_id, canonical_hash)
     created_assets: list[StoredObjectReceipt] = []
     partial_keys: list[str] = []
+    partial_objects: list[PartialB2Object] = []
+    current_stage = "vault_source_upload"
+    bucket_role = "assets"
+    object_kind = "source"
+
+    def begin(stage: str, *, role: str, kind: str) -> None:
+        nonlocal current_stage, bucket_role, object_kind
+        current_stage = stage
+        bucket_role = role
+        object_kind = kind
+        if stage_callback is not None:
+            stage_callback(stage)
 
     try:
+        begin("vault_source_upload", role="assets", kind="source")
         assets_source = head_object_receipt(
             assets_client,
             bucket=assets_bucket,
@@ -276,6 +322,10 @@ def execute_b2_custody(
                 version_id=assets_source.version_id,
             )
         partial_keys.append(source_key)
+        partial_objects.append(
+            PartialB2Object("assets", "source", source_key, assets_source.version_id, False)
+        )
+        begin("vault_source_upload", role="assets", kind="manifest")
         assets_manifest = head_object_receipt(
             assets_client,
             bucket=assets_bucket,
@@ -305,6 +355,12 @@ def execute_b2_custody(
                 version_id=assets_manifest.version_id,
             )
         partial_keys.append(manifest_key)
+        partial_objects.append(
+            PartialB2Object(
+                "assets", "manifest", manifest_key, assets_manifest.version_id, False
+            )
+        )
+        begin("vault_source_upload", role="vault", kind="source")
         existing_vault_source = head_object_receipt(
             vault_client,
             bucket=vault_bucket,
@@ -321,8 +377,21 @@ def execute_b2_custody(
                 content_type=source_content_type,
                 retention_until=retention_until,
                 metadata={"firemark-kind": "source", "firemark-schema": "1"},
+                stage_callback=lambda stage: begin(stage, role="vault", kind="source"),
+                upload_stage="vault_source_upload",
+                hash_verification_stage="vault_source_hash_verification",
+                retention_verification_stage="vault_source_retention_verification",
             )
         else:
+            begin("vault_source_hash_verification", role="vault", kind="source")
+            download_bytes_verified(
+                vault_client,
+                bucket=vault_bucket,
+                key=locked_source_key,
+                expected_sha256=source_sha256,
+                version_id=existing_vault_source.version_id,
+            )
+            begin("vault_source_retention_verification", role="vault", kind="source")
             state = read_object_retention(
                 vault_client,
                 bucket=vault_bucket,
@@ -331,19 +400,18 @@ def execute_b2_custody(
             )
             if state.retain_until + timedelta(seconds=1) < retention_until.astimezone(UTC):
                 raise B2CustodyWorkflowError("Existing vault source retention conflicts")
-            download_bytes_verified(
-                vault_client,
-                bucket=vault_bucket,
-                key=locked_source_key,
-                expected_sha256=source_sha256,
-                version_id=existing_vault_source.version_id,
-            )
             vault_source = LockedObjectReceipt(
                 **existing_vault_source.model_dump(),
                 retention_until=state.retain_until,
                 retention_verified=True,
             )
         partial_keys.append(locked_source_key)
+        partial_objects.append(
+            PartialB2Object(
+                "vault", "source", locked_source_key, vault_source.version_id, True
+            )
+        )
+        begin("vault_manifest_upload", role="vault", kind="manifest")
         existing_vault_manifest = head_object_receipt(
             vault_client,
             bucket=vault_bucket,
@@ -360,8 +428,21 @@ def execute_b2_custody(
                 content_type=manifest_content_type,
                 retention_until=retention_until,
                 metadata={"firemark-kind": "manifest", "firemark-schema": "1"},
+                stage_callback=lambda stage: begin(stage, role="vault", kind="manifest"),
+                upload_stage="vault_manifest_upload",
+                hash_verification_stage="vault_manifest_hash_verification",
+                retention_verification_stage="vault_manifest_retention_verification",
             )
         else:
+            begin("vault_manifest_hash_verification", role="vault", kind="manifest")
+            download_bytes_verified(
+                vault_client,
+                bucket=vault_bucket,
+                key=locked_manifest_key,
+                expected_sha256=manifest_sha256,
+                version_id=existing_vault_manifest.version_id,
+            )
+            begin("vault_manifest_retention_verification", role="vault", kind="manifest")
             state = read_object_retention(
                 vault_client,
                 bucket=vault_bucket,
@@ -370,20 +451,35 @@ def execute_b2_custody(
             )
             if state.retain_until + timedelta(seconds=1) < retention_until.astimezone(UTC):
                 raise B2CustodyWorkflowError("Existing vault manifest retention conflicts")
-            download_bytes_verified(
-                vault_client,
-                bucket=vault_bucket,
-                key=locked_manifest_key,
-                expected_sha256=manifest_sha256,
-                version_id=existing_vault_manifest.version_id,
-            )
             vault_manifest = LockedObjectReceipt(
                 **existing_vault_manifest.model_dump(),
                 retention_until=state.retain_until,
                 retention_verified=True,
             )
         partial_keys.append(locked_manifest_key)
+        partial_objects.append(
+            PartialB2Object(
+                "vault", "manifest", locked_manifest_key, vault_manifest.version_id, True
+            )
+        )
     except Exception as exc:
+        if (
+            isinstance(exc, B2PersistedObjectError)
+            and bucket_role == "vault"
+            and object_kind in {"source", "manifest"}
+        ):
+            partial_kind: Literal["source", "manifest"] = (
+                "source" if object_kind == "source" else "manifest"
+            )
+            partial_objects.append(
+                PartialB2Object(
+                    "vault",
+                    partial_kind,
+                    exc.key,
+                    exc.version_id,
+                    exc.retained,
+                )
+            )
         for stored in created_assets:
             try:
                 delete_unlocked_version_verified(
@@ -396,9 +492,16 @@ def execute_b2_custody(
                 )
             except Exception:
                 pass
+        failure = classify_b2_failure(exc, stage=current_stage)
         raise B2CustodyWorkflowError(
             "B2 custody failed; inspect safe partial_keys before retrying",
             partial_keys=tuple(partial_keys),
+            stage=current_stage,
+            category=failure.category,
+            service_error_code=failure.service_error_code,
+            bucket_role=bucket_role,
+            object_kind=object_kind,
+            partial_objects=tuple(partial_objects),
         ) from exc
 
     timestamp = _utc(now or datetime.now(UTC))

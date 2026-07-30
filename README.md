@@ -335,6 +335,20 @@ VersionIds, retention timestamps, package versions, and stage results. It exclud
 all credentials and bearer headers, signing private material, full private Manifest, provider
 response, and raw delivery URL.
 
+When Generate & Seal reaches B2 but fails before registration, isolate custody without repeating
+the provider request or contacting Supabase:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal_b2.py
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal_b2.py --live `
+  --output-report .artifacts\generate-and-seal-b2-report.json --force
+```
+
+The live B2-only checkpoint uses deterministic local fixture provenance, retains only its source
+and private Manifest versions under COMPLIANCE, verifies every exact version, and deletes the
+temporary sealed assets version by exact VersionId. It makes no OpenAI or Supabase request and
+never deletes a vault version.
+
 Configure two private buckets locally by copying `.env.example` to `.env`. The vault bucket must
 have Object Lock enabled when it is created. Use one-day retention only for a deliberate
 development smoke run; the current production target is 90 days and must be selected explicitly.

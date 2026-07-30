@@ -268,6 +268,46 @@ def test_metadata_allowlist_and_values_are_enforced(fake_s3: FakeS3Client) -> No
             content_type="application/octet-stream",
             metadata={"firemark-kind": "x" * 300},
         )
+    with pytest.raises(B2ConfigurationError, match="non-allowlisted"):
+        upload_bytes_verified(
+            fake_s3,
+            bucket="assets-test",
+            key="assets/metadata.bin",
+            data=data,
+            expected_sha256=digest,
+            content_type="application/octet-stream",
+            metadata={"firemark_kind": "source"},
+        )
+    receipt = upload_bytes_verified(
+        fake_s3,
+        bucket="assets-test",
+        key="assets/metadata-uppercase.bin",
+        data=data,
+        expected_sha256=digest,
+        content_type="application/octet-stream",
+        metadata={"firemark-kind": "SOURCE-V1"},
+    )
+    assert receipt.version_id is not None
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [True, datetime(2026, 7, 30, tzinfo=UTC), "non-ascii-ñ", "", "x" * 257],
+)
+def test_metadata_rejects_non_string_non_ascii_empty_and_oversized_values(
+    fake_s3: FakeS3Client, unsafe_value: object
+) -> None:
+    data = b"metadata-value"
+    with pytest.raises(B2ConfigurationError, match="value is unsafe"):
+        upload_bytes_verified(
+            fake_s3,
+            bucket="assets-test",
+            key="assets/metadata-value.bin",
+            data=data,
+            expected_sha256=sha256_bytes(data),
+            content_type="application/octet-stream",
+            metadata={"firemark-kind": unsafe_value},  # type: ignore[dict-item]
+        )
 
 
 def test_service_errors_wrapped_but_programming_errors_propagate(fake_s3: FakeS3Client) -> None:
