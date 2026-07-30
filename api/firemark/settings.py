@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 import re
 from pathlib import Path
@@ -58,6 +59,18 @@ class SupabaseConfig(BaseModel):
     service_role_key: SecretStr
 
 
+class LiveSupabaseControlPlaneConfig(BaseModel):
+    """Complete, separated configuration for the explicit live Supabase checkpoint."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    publishable_key: str
+    service_role_key: SecretStr
+    public_base_url: str
+    delivery_ttl_seconds: int
+
+
 class Settings(BaseModel):
     """Typed configuration without import-time credential requirements."""
 
@@ -81,6 +94,7 @@ class Settings(BaseModel):
     vault_retention_days: int | None = None
     presigned_url_ttl_seconds: int = 300
     supabase_url: str | None = None
+    supabase_publishable_key: str | None = None
     supabase_service_role_key: SecretStr | None = None
     public_base_url: str | None = None
     delivery_ttl_seconds: int = 300
@@ -306,6 +320,39 @@ class Settings(BaseModel):
             service_role_key=self.supabase_service_role_key,
         )
 
+    def require_live_supabase_control_plane_config(
+        self,
+    ) -> LiveSupabaseControlPlaneConfig:
+        """Return complete, deliberately separated live-checkpoint configuration."""
+        values = (
+            self.supabase_url,
+            self.supabase_publishable_key,
+            self.supabase_service_role_key,
+            self.public_base_url,
+        )
+        if any(value is None for value in values) or (
+            "delivery_ttl_seconds" not in self.model_fields_set
+        ):
+            raise ValueError("Complete live Supabase Control Plane configuration is required")
+        assert self.supabase_url is not None
+        assert self.supabase_publishable_key is not None
+        assert self.supabase_service_role_key is not None
+        assert self.public_base_url is not None
+        service_key = self.supabase_service_role_key.get_secret_value()
+        if hmac.compare_digest(self.supabase_publishable_key, service_key):
+            raise ValueError("Supabase publishable and backend secret keys must be different")
+        if not self.supabase_publishable_key.startswith("sb_publishable_"):
+            raise ValueError("SUPABASE_PUBLISHABLE_KEY must be a publishable key")
+        if not service_key.startswith("sb_secret_"):
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY must be an sb_secret_ backend key")
+        return LiveSupabaseControlPlaneConfig(
+            url=self.supabase_url,
+            publishable_key=self.supabase_publishable_key,
+            service_role_key=self.supabase_service_role_key,
+            public_base_url=self.public_base_url,
+            delivery_ttl_seconds=self.delivery_ttl_seconds,
+        )
+
 
 _ENVIRONMENT_FIELDS = {
     "FIREMARK_ENV": "environment",
@@ -326,6 +373,7 @@ _ENVIRONMENT_FIELDS = {
     "FIREMARK_VAULT_RETENTION_DAYS": "vault_retention_days",
     "FIREMARK_PRESIGNED_URL_TTL_SECONDS": "presigned_url_ttl_seconds",
     "SUPABASE_URL": "supabase_url",
+    "SUPABASE_PUBLISHABLE_KEY": "supabase_publishable_key",
     "SUPABASE_SERVICE_ROLE_KEY": "supabase_service_role_key",
     "FIREMARK_PUBLIC_BASE_URL": "public_base_url",
     "FIREMARK_DELIVERY_TTL_SECONDS": "delivery_ttl_seconds",

@@ -30,7 +30,10 @@ ENVIRONMENT_VARIABLES = (
     "FIREMARK_VAULT_RETENTION_DAYS",
     "FIREMARK_PRESIGNED_URL_TTL_SECONDS",
     "SUPABASE_URL",
+    "SUPABASE_PUBLISHABLE_KEY",
     "SUPABASE_SERVICE_ROLE_KEY",
+    "FIREMARK_PUBLIC_BASE_URL",
+    "FIREMARK_DELIVERY_TTL_SECONDS",
     "GMI_API_KEY",
     "ELEVENLABS_API_KEY",
     "REPLICATE_API_TOKEN",
@@ -185,6 +188,58 @@ def test_legacy_generic_b2_environment_variables_are_not_applied(
     settings = load_settings()
     assert settings.b2_assets_key_id is None
     assert "legacy-secret" not in repr(settings)
+
+
+def test_complete_live_supabase_configuration_is_explicit_and_separated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test-value")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sb_secret_test-value")
+    monkeypatch.setenv("FIREMARK_PUBLIC_BASE_URL", "https://verify.firemark.test")
+    monkeypatch.setenv("FIREMARK_DELIVERY_TTL_SECONDS", "300")
+    config = load_settings().require_live_supabase_control_plane_config()
+    assert config.publishable_key == "sb_publishable_test-value"
+    assert config.service_role_key.get_secret_value() == "sb_secret_test-value"
+    assert config.delivery_ttl_seconds == 300
+    assert "sb_secret_test-value" not in repr(config)
+
+
+def test_live_supabase_configuration_rejects_missing_explicit_values() -> None:
+    settings = Settings(
+        supabase_url="https://project.supabase.co",
+        supabase_publishable_key="sb_publishable_test-value",
+        supabase_service_role_key="sb_secret_test-value",
+        public_base_url="https://verify.firemark.test",
+    )
+    with pytest.raises(ValueError, match="Complete live Supabase"):
+        settings.require_live_supabase_control_plane_config()
+
+
+def test_live_supabase_configuration_rejects_identical_or_confused_keys() -> None:
+    common = {
+        "supabase_url": "https://project.supabase.co",
+        "public_base_url": "https://verify.firemark.test",
+        "delivery_ttl_seconds": 300,
+    }
+    with pytest.raises(ValueError, match="must be different"):
+        Settings(
+            **common,
+            supabase_publishable_key="same-key",
+            supabase_service_role_key="same-key",
+        ).require_live_supabase_control_plane_config()
+    with pytest.raises(ValueError, match="publishable key"):
+        Settings(
+            **common,
+            supabase_publishable_key="not-a-publishable-key",
+            supabase_service_role_key="sb_secret_test-value",
+        ).require_live_supabase_control_plane_config()
+    with pytest.raises(ValueError, match="sb_secret_"):
+        Settings(
+            **common,
+            supabase_publishable_key="sb_publishable_test-value",
+            supabase_service_role_key="legacy-secret",
+        ).require_live_supabase_control_plane_config()
 
 
 def test_environment_and_signing_configuration_remain_supported(

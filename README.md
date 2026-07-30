@@ -53,10 +53,10 @@ with `sealed_sha256`.
 The repository contains the local Trust Kernel, the Genblaze Local Provenance Roundtrip, the B2
 Custody Kernel, and the FIREMARK Control Plane. The Control Plane exposes redacted Birth
 Certificates, reconstructs and verifies signed evidence, records append-oriented decisions, and
-requires verification before private delivery. A production-oriented Supabase migration and a
-lazy service-role adapter are included, but no live Supabase project has been created or verified.
-Ordinary tests remain zero-network; external evidence exists only after an explicit successful live
-checkpoint.
+requires verification before private delivery. A production-oriented Supabase migration, lazy
+service-role adapter, and bounded live verification checkpoint are included. Ordinary tests remain
+zero-network; external Supabase evidence exists only after an owner explicitly runs the live
+checkpoint successfully against a disposable project.
 
 ## Control Plane
 
@@ -193,19 +193,36 @@ D:\firemark\.venv\Scripts\python.exe -m uvicorn api.firemark.app:create_app `
 OpenAPI is available locally at `http://127.0.0.1:8000/docs`. The default in-memory process starts
 empty; certificate registration is an internal service operation, not a public endpoint.
 
-For a future Supabase checkpoint, create a project manually, review and apply the migration through
-the Supabase CLI, then configure these ignored local values:
+For the Supabase checkpoint, create a disposable project manually, review and apply the migration
+through the Supabase CLI, then configure these ignored local values:
 
 ```text
 SUPABASE_URL=
+SUPABASE_PUBLISHABLE_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 FIREMARK_PUBLIC_BASE_URL=
 FIREMARK_DELIVERY_TTL_SECONDS=
 ```
 
-Do not place the service-role key in a browser, public certificate, log, fixture, or committed file.
-The first live checkpoint must verify RLS, public RPC projection, atomic registration, append-only
-events, and revocation against a disposable non-production project before production use.
+The publishable key must be an `sb_publishable_` key and the backend key must be a distinct
+`sb_secret_` key. Do not place the backend key in a browser, public certificate, log, fixture, or
+committed file.
+
+Review the zero-network behavior first, then let a single owner run the live checkpoint:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_supabase_control_plane.py
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_supabase_control_plane.py --live `
+  --output-report .artifacts\supabase-control-plane-report.json --force
+```
+
+Without `--live`, the command constructs no Supabase client, performs no network request, and exits
+with informational code 2. The live run creates uniquely named synthetic local-fixture rows, proves
+private-table RLS and the public RPC allowlist, exercises atomic and idempotent registration,
+rejects a conflicting duplicate, appends one verification event and one URL-free blocked delivery
+event, and revokes the smoke certificate. It makes no provider or B2 request. The safe report omits
+credentials, private evidence, signed envelopes, prompts, parameters, manifests, authorization
+headers, and URLs.
 
 The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
 The settings loader reads process environment variables explicitly; it does not automatically load
@@ -332,8 +349,9 @@ or verify a complete Manifest without resolving `manifest_uri`.
 ## Honest limitations
 
 The B2 Custody Kernel does not prove provider generation; its smoke content is a local fixture. The
-Control Plane migration and Supabase adapter have comprehensive zero-network contract tests but no
-live Supabase evidence yet. Real provider generation, the frontend, authentication/authorization
+Control Plane migration, Supabase adapter, and live-checkpoint implementation have comprehensive
+zero-network contract tests, but live Supabase evidence exists only after the owner runs the explicit
+command successfully. Real provider generation, the frontend, authentication/authorization
 policy for delivery callers, public inline capsules, and deployment remain unimplemented. The B2
 live proof is environment-specific, creates non-atomic state across four objects, and cannot make
 the complete application production-ready.
