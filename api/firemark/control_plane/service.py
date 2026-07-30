@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from api.firemark.b2_storage import RedactedPresignedURL, generate_presigned_get
+from api.firemark.b2_storage import (
+    RedactedPresignedURL,
+    generate_presigned_get,
+    head_object_receipt,
+)
 from api.firemark.control_plane.models import (
     AssetRecord,
     CertificateRecord,
@@ -49,6 +53,15 @@ class B2DeliveryStorage:
         return "B2DeliveryStorage(client=<redacted>)"
 
     def issue_download(self, asset: AssetRecord, *, ttl_seconds: int) -> RedactedPresignedURL:
+        receipt = head_object_receipt(
+            self._client,
+            bucket=asset.assets_bucket,
+            key=asset.assets_key,
+            expected_sha256=asset.sealed_sha256,
+            version_id=asset.assets_version_id,
+        )
+        if receipt is None or receipt.version_id != asset.assets_version_id:
+            raise DeliveryStorageError("Exact sealed asset version is unavailable")
         return generate_presigned_get(
             self._client,
             bucket=asset.assets_bucket,

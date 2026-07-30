@@ -15,6 +15,8 @@ from api.firemark.settings import Settings
 from tests.control_plane_helpers import SEALED, registered_service
 
 RAW_URL = "https://s3.example.test/private/file?X-Amz-Signature=raw-secret"
+DELIVERY_KEY = "test-only-delivery-api-key"
+DELIVERY_HEADERS = {"Authorization": f"Bearer {DELIVERY_KEY}"}
 
 
 class APIStorage:
@@ -31,7 +33,11 @@ class APIStorage:
 def _client(*, storage: Any = None) -> tuple[TestClient, Any, Any]:
     _, repository, evidence = registered_service()
     app = create_app(
-        Settings(public_base_url="https://certs.firemark.test", delivery_ttl_seconds=60),
+        Settings(
+            public_base_url="https://certs.firemark.test",
+            delivery_ttl_seconds=60,
+            delivery_api_key=DELIVERY_KEY,
+        ),
         repository,
         storage,
     )
@@ -52,10 +58,12 @@ def test_factory_health_dependency_injection_and_openapi_are_zero_network() -> N
     app = create_app(repository=repository)
     assert app.title == "FIREMARK Control Plane"
     assert set(app.openapi()["paths"]) == {
-        "/healthz", "/v1/certificates/{cert_id}", "/v1/verify", "/v1/delivery/{cert_id}"
+        "/healthz", "/v1/certificates/{cert_id}", "/v1/verify",
+        "/v1/generate-and-seal", "/v1/delivery/{cert_id}"
     }
     configured = create_app(
         Settings(
+            repository_backend="supabase",
             supabase_url="https://project.supabase.co",
             supabase_service_role_key="service-role-secret",
         )
@@ -113,6 +121,7 @@ def test_delivery_success_serializes_url_once_and_never_logs_or_persists_it(
         response = client.post(
             f"/v1/delivery/{evidence.envelope.cert_id}",
             json={"presented_sha256": SEALED},
+            headers=DELIVERY_HEADERS,
         )
     assert response.status_code == 200
     assert response.json()["download_url"] == RAW_URL
@@ -122,11 +131,24 @@ def test_delivery_success_serializes_url_once_and_never_logs_or_persists_it(
     assert all("url" not in event for event in repository.delivery_events)
 
 
+def test_delivery_requires_the_distinct_delivery_bearer_key() -> None:
+    client, _, evidence = _client(storage=APIStorage())
+    path = f"/v1/delivery/{evidence.envelope.cert_id}"
+    payload = {"presented_sha256": SEALED}
+    missing = client.post(path, json=payload)
+    invalid = client.post(path, json=payload, headers={"Authorization": "Bearer wrong"})
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+    assert missing.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+    assert invalid.json()["error"]["code"] == "INVALID_CREDENTIALS"
+
+
 def test_delivery_failures_have_no_url_and_do_not_call_storage() -> None:
     client, repository, evidence = _client(storage=APIStorage())
     mismatch = client.post(
         f"/v1/delivery/{evidence.envelope.cert_id}",
         json={"presented_sha256": "9" * 64},
+        headers=DELIVERY_HEADERS,
     )
     assert mismatch.status_code == 403
     assert "download_url" not in mismatch.text
@@ -137,6 +159,7 @@ def test_delivery_failures_have_no_url_and_do_not_call_storage() -> None:
     revoked = client.post(
         f"/v1/delivery/{evidence.envelope.cert_id}",
         json={"presented_sha256": SEALED},
+        headers=DELIVERY_HEADERS,
     )
     assert revoked.status_code == 403
     assert RAW_URL not in revoked.text
@@ -148,6 +171,7 @@ def test_storage_failure_is_safe_and_url_is_absent_from_error_and_logs(caplog: A
         response = client.post(
             f"/v1/delivery/{evidence.envelope.cert_id}",
             json={"presented_sha256": SEALED},
+            headers=DELIVERY_HEADERS,
         )
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "DELIVERY_STORAGE_UNAVAILABLE"
@@ -161,7 +185,7 @@ def test_default_factory_and_unexpected_errors_are_safe() -> None:
     response = client.post(
         "/v1/delivery/missing", json={"presented_sha256": SEALED}
     )
-    assert response.status_code == 403
+    assert response.status_code == 401
     assert "download_url" not in response.text
 
 

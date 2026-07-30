@@ -300,18 +300,37 @@ def test_b2_delivery_adapter_uses_exact_version_and_redacts_client() -> None:
             )
             return "https://s3.example.test/exact?X-Amz-Signature=private"
 
+        def head_object(self, **kwargs: object) -> dict[str, object]:
+            self.calls.append({"operation": "head_object", **kwargs})
+            return {
+                "ContentLength": 100,
+                "ContentType": "image/png",
+                "Metadata": {"firemark-sha256": evidence.asset.sealed_sha256},
+                "VersionId": evidence.asset.assets_version_id,
+                "ETag": '"etag"',
+                "LastModified": evidence.asset.created_at,
+            }
+
     client = Presigner()
     storage = B2DeliveryStorage(client)
     result = storage.issue_download(evidence.asset, ttl_seconds=60)
-    assert client.calls == [{
-        "operation": "get_object",
-        "Params": {
+    assert client.calls == [
+        {
+            "operation": "head_object",
             "Bucket": evidence.asset.assets_bucket,
             "Key": evidence.asset.assets_key,
             "VersionId": evidence.asset.assets_version_id,
         },
-        "ExpiresIn": 60,
-        "HttpMethod": "GET",
-    }]
+        {
+            "operation": "get_object",
+            "Params": {
+                "Bucket": evidence.asset.assets_bucket,
+                "Key": evidence.asset.assets_key,
+                "VersionId": evidence.asset.assets_version_id,
+            },
+            "ExpiresIn": 60,
+            "HttpMethod": "GET",
+        },
+    ]
     assert "private" not in repr(storage)
     assert "private" not in repr(result)

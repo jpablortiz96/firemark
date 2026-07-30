@@ -28,7 +28,9 @@ DEFAULT_STREAM_CHUNK_SIZE = 1024 * 1024
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _METADATA_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9._:/+ -]{1,256}$")
-_METADATA_KEYS = frozenset({"firemark-sha256", "firemark-kind", "firemark-schema"})
+_METADATA_KEYS = frozenset(
+    {"firemark-sha256", "firemark-kind", "firemark-schema", "firemark-cert-id"}
+)
 _EXTENSIONS = frozenset(
     {
         "aac",
@@ -205,6 +207,12 @@ def assets_source_key(sha256: str, extension: str) -> str:
     digest = _validate_digest(sha256)
     suffix = normalize_extension(extension)
     return f"assets/{digest[:2]}/{digest[2:4]}/{digest}.{suffix}"
+
+
+def sealed_asset_key(sha256: str) -> str:
+    """Build the deterministic private distributable PNG key."""
+    digest = _validate_digest(sha256)
+    return f"sealed/{digest[:2]}/{digest[2:4]}/{digest}.png"
 
 
 def assets_manifest_key(run_id: str, canonical_hash: str) -> str:

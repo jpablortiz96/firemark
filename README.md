@@ -25,16 +25,16 @@ FIREMARK has exactly three product capabilities:
 
 ## Trust model
 
-The planned trust model preserves Genblaze provenance, embeds a redacted manifest in supported
-media, signs a FIREMARK Seal Envelope with Ed25519, and retains original evidence in immutable
-object storage. Public verification is intended to connect those records without exposing private
-evidence or credentials.
+The trust model preserves complete Genblaze provenance privately, embeds a closed redacted
+FIREMARK public capsule in supported media, signs a FIREMARK Seal Envelope with Ed25519, and
+retains original evidence in immutable object storage. Public verification connects those records
+without exposing private evidence or credentials.
 
 `source_sha256` and `sealed_sha256` are deliberately distinct and must never be treated as
 interchangeable:
 
 - `source_sha256` identifies the generated provider output before media embedding.
-- `sealed_sha256` identifies the final distributed file after the Genblaze manifest has been
+- `sealed_sha256` identifies the final distributed file after the FIREMARK public capsule has been
   embedded.
 
 The local Trust Kernel signs the complete canonical FIREMARK Seal Envelope with Ed25519. A valid
@@ -50,13 +50,21 @@ with `sealed_sha256`.
 
 ## Repository status
 
-The repository contains the local Trust Kernel, the Genblaze Local Provenance Roundtrip, the B2
-Custody Kernel, and the FIREMARK Control Plane. The Control Plane exposes redacted Birth
-Certificates, reconstructs and verifies signed evidence, records append-oriented decisions, and
-requires verification before private delivery. A production-oriented Supabase migration, lazy
-service-role adapter, and bounded live verification checkpoint are included. Ordinary tests remain
-zero-network; external Supabase evidence exists only after an owner explicitly runs the live
-checkpoint successfully against a disposable project.
+The repository contains the local Trust Kernel, Genblaze provenance integration, B2 Custody
+Kernel, Control Plane, and production Generate & Seal path for PNG images. The live B2 checkpoint
+has proved COMPLIANCE retention and the live Supabase checkpoint has proved RLS, atomic
+registration, public projection, events, and revocation. Generate & Seal now wires the official
+OpenAI SDK, private canonical provenance, capsule embedding, custody, sealed storage, signing,
+atomic registration, and authenticated delivery. Its live evidence remains pending the explicit
+owner-run checkpoint; ordinary tests remain zero-network.
+
+## Roadmap
+
+Completed milestones are repository foundation, Trust Kernel, SealEnvelopeV1, Genblaze
+provenance, B2 Custody and live COMPLIANCE proof, FastAPI Control Plane, Supabase schema and live
+verification, and the local production wiring for Generate & Seal. Remaining work is the public
+Birth Certificate frontend, Verify Gate user experience, deployment, one real demo generation,
+and hackathon submission.
 
 ## Control Plane
 
@@ -72,23 +80,75 @@ The HTTP surface is intentionally small:
 | `GET` | `/healthz` | Local process health; external dependencies are not contacted. |
 | `GET` | `/v1/certificates/{cert_id}` | Redacted public Birth Certificate. |
 | `POST` | `/v1/verify` | Signature, envelope, custody-reference, status, and optional hash verification. |
-| `POST` | `/v1/delivery/{cert_id}` | Verify Gate requiring the exact `sealed_sha256`. |
+| `POST` | `/v1/generate-and-seal` | Admin-authenticated, idempotent PNG generation and sealing. |
+| `POST` | `/v1/delivery/{cert_id}` | Delivery-authenticated Verify Gate requiring the exact `sealed_sha256`. |
 
-The public certificate includes only public identifiers, `sealed_sha256`, `canonical_hash`, signer
-material, the redacted public manifest, status, issuance time, and its verification URL. Prompts,
-parameters, seeds, `source_sha256`, storage locations, VersionIds, and custody receipt internals
-remain on the private service-role path.
+The public certificate includes public identifiers, `sealed_sha256`, `canonical_hash`, signer
+material, status, issuance time, verification URL, and the redacted capsule projection (which binds
+`source_sha256`). Prompts, parameters, seeds, storage locations, VersionIds, and custody receipt
+internals remain on the private service-role path.
 
 The Verify Gate records verification before making a delivery decision. It asks the injected B2
-delivery adapter for an exact-version, short-lived private download only after status, signature,
-envelope, custody references, and presented `sealed_sha256` all pass. The raw URL exists only in the
-successful HTTP serializer; the domain result, event repository, logs, exceptions, and failure
-responses contain no URL.
+delivery adapter to confirm the recorded exact VersionId and then issue a short-lived private
+download only after status, signature, envelope, custody references, and presented
+`sealed_sha256` all pass. The raw URL exists only in the successful HTTP serializer; the domain
+result, event repository, logs, exceptions, and failure responses contain no URL.
 
 The migration at `supabase/migrations/20260729000100_firemark_control_plane.sql` creates six RLS
 tables. Anonymous and authenticated roles receive no direct table access. A safe public certificate
 RPC exposes an allowlist, while a service-role-only PostgreSQL RPC atomically and idempotently
 registers the run, asset, custody record, and certificate.
+
+## Generate & Seal architecture
+
+`api.firemark.bootstrap.build_runtime()` is the explicit production composition root. Repository
+selection is controlled by `FIREMARK_REPOSITORY_BACKEND`; `memory` remains available for ordinary
+tests and `supabase` selects the lazy service-role adapter. Application construction performs no
+network request. OpenAI, B2, signing, and delivery dependencies are constructed only when their
+operation is requested, and each boundary remains injectable.
+
+`POST /v1/generate-and-seal` requires `Authorization: Bearer <FIREMARK_ADMIN_API_KEY>` and a safe
+`Idempotency-Key`. The request follows this order:
+
+1. Generate one PNG through the injected provider and hash the untouched bytes as
+   `source_sha256`.
+2. Build and verify the complete private canonical Genblaze Manifest and obtain its
+   `canonical_hash`.
+3. Embed `FiremarkPublicCapsuleV1` into a deterministic PNG `tEXt` chunk and hash the resulting
+   distributable bytes as `sealed_sha256`.
+4. Retain the raw source and full Manifest in the B2 vault under COMPLIANCE retention, verifying
+   bytes and exact VersionIds.
+5. Upload and re-download the sealed PNG at
+   `sealed/{sha256[0:2]}/{sha256[2:4]}/{sha256}.png` using allowlisted metadata only.
+6. Construct and sign `SealEnvelopeV1`, then atomically register the complete certificate bundle
+   in Supabase. No successful API response is returned before verified custody and registration.
+
+The idempotency key deterministically names the private run, asset, and certificate. A private
+request fingerprint stored inside `parameters_private` returns the same completed result for an
+identical retry and rejects a conflicting retry with HTTP 409. Failed pre-registration work can be
+retried safely; persisted partial locations are carried only by internal safe errors and never
+returned as credentials or URLs.
+
+The public capsule contains only its fixed schema version, certificate/run/asset identifiers,
+`canonical_hash`, `source_sha256`, signer key ID, verification URL, and issuance time. It excludes
+`sealed_sha256` because embedding that value would create a circular hash. It also excludes prompts,
+parameters, seeds, provider responses and credentials, full manifests, signatures, private keys,
+B2 VersionIds, and presigned URLs. Re-embedding an identical capsule is byte-deterministic;
+conflicting, duplicate, malformed, oversized, or non-canonical capsules fail closed. PNG pixel data
+is preserved.
+
+The official `openai` SDK is pinned exactly. GPT Image requests select PNG output and consume the
+documented base64 result; DALL-E requests use their documented response-format option. The adapter
+also supports the official URL response shape through an HTTPS-only, hostname-allowlisted, bounded,
+non-redirecting download. Authentication, rate-limit, invalid-request, safety, timeout,
+unavailable, and malformed-response failures become safe normalized codes. Provider bytes,
+response bodies, URLs, and credentials are never logged or persisted. The deterministic fake
+provider is test-only, reports `ai_generated=false`, and cannot silently run in production.
+
+Generation and delivery use distinct `SecretStr` bearer credentials and constant-time comparison.
+Missing or invalid bearer credentials return 401; public health, Birth Certificate, and Verify
+routes remain anonymous. The prompt is sent only to the selected provider and retained only in the
+private generation run.
 
 ## Genblaze local provenance roundtrip
 
@@ -171,7 +231,7 @@ Use Python 3.12 from Windows PowerShell:
 ```powershell
 cd D:\firemark
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements-dev.txt
+python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 python -m pytest
 python -m pytest --cov=api.firemark --cov-report=term-missing --cov-fail-under=95
@@ -181,6 +241,8 @@ python scripts\smoke_trust.py
 python scripts\smoke_genblaze_roundtrip.py
 python scripts\smoke_b2_custody.py --help
 python scripts\smoke_b2_custody.py
+python scripts\smoke_generate_and_seal.py --help
+python scripts\smoke_generate_and_seal.py
 ```
 
 Start the local API with the injected in-memory repository and no external checks:
@@ -202,6 +264,16 @@ SUPABASE_PUBLISHABLE_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
 FIREMARK_PUBLIC_BASE_URL=
 FIREMARK_DELIVERY_TTL_SECONDS=
+FIREMARK_REPOSITORY_BACKEND=
+FIREMARK_ADMIN_API_KEY=
+FIREMARK_DELIVERY_API_KEY=
+FIREMARK_SIGNING_PRIVATE_KEY_B64=
+FIREMARK_SIGNING_PUBLIC_KEY_B64=
+OPENAI_API_KEY=
+OPENAI_IMAGE_MODEL=
+OPENAI_IMAGE_SIZE=
+FIREMARK_GENERATION_TIMEOUT_SECONDS=
+FIREMARK_MAX_GENERATED_IMAGE_BYTES=
 ```
 
 Prefer a current `sb_publishable_` public key and a distinct current `sb_secret_` backend key.
@@ -245,6 +317,23 @@ missing, ambiguous, or differently revoked bundles fail closed.
 The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
 The settings loader reads process environment variables explicitly; it does not automatically load
 the `.env` file. Only explicitly live CLI checkpoints load the ignored repository `.env`.
+
+Review the non-live Generate & Seal command first. It constructs no provider, B2, or Supabase
+client and exits with informational code 2. The explicitly live command makes exactly one real
+OpenAI image request and may incur provider and storage cost:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal.py
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal.py --live `
+  --output-report .artifacts\generate-and-seal-report.json --force
+```
+
+The live checkpoint verifies source, canonical, sealed, signature, custody, registration, public
+projection, Verify Gate, authenticated delivery, delivered bytes, embedded capsule, and a bounded
+database credential scan. Its safe report includes evidence identifiers, hashes, safe object keys,
+VersionIds, retention timestamps, package versions, and stage results. It excludes the prompt,
+all credentials and bearer headers, signing private material, full private Manifest, provider
+response, and raw delivery URL.
 
 Configure two private buckets locally by copying `.env.example` to `.env`. The vault bucket must
 have Object Lock enabled when it is created. Use one-day retention only for a deliberate
@@ -366,10 +455,11 @@ or verify a complete Manifest without resolving `manifest_uri`.
 
 ## Honest limitations
 
-The B2 Custody Kernel does not prove provider generation; its smoke content is a local fixture. The
-Control Plane migration, Supabase adapter, and live-checkpoint implementation have comprehensive
-zero-network contract tests, but live Supabase evidence exists only after the owner runs the explicit
-command successfully. Real provider generation, the frontend, authentication/authorization
-policy for delivery callers, public inline capsules, and deployment remain unimplemented. The B2
-live proof is environment-specific, creates non-atomic state across four objects, and cannot make
-the complete application production-ready.
+The historical B2 Custody smoke uses a local fixture and therefore does not prove provider
+generation. The B2 and Supabase live checkpoints are environment-specific evidence, not a claim
+that the complete application is deployed. Generate & Seal has comprehensive zero-network contract
+tests, but no real OpenAI generation evidence exists until the owner runs its explicit live command.
+The public frontend, Birth Certificate experience, Verify Gate user experience, deployment, real
+demo generation, and hackathon submission remain pending. B2 custody spans multiple objects and is
+not cross-object atomic; a registration failure can leave safe, billable partial storage that must
+be inspected before operational cleanup.

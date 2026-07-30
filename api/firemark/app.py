@@ -13,11 +13,11 @@ from fastapi.responses import JSONResponse
 from starlette.responses import Response
 
 from api.firemark.api.errors import APIError, ErrorDetail, ErrorResponse
-from api.firemark.api.routes import certificates, delivery, health, verify
-from api.firemark.control_plane.memory_repository import MemoryCertificateRepository
+from api.firemark.api.routes import certificates, delivery, generate, health, verify
+from api.firemark.bootstrap import build_runtime
 from api.firemark.control_plane.repository import CertificateRepository
-from api.firemark.control_plane.service import CertificateService, DeliveryStorage
-from api.firemark.control_plane.supabase_repository import SupabaseCertificateRepository
+from api.firemark.control_plane.service import DeliveryStorage
+from api.firemark.generate_and_seal import GenerateAndSealService
 from api.firemark.settings import Settings, load_settings
 
 logger = logging.getLogger("firemark.api")
@@ -38,29 +38,25 @@ def create_app(
     settings: Settings | None = None,
     repository: CertificateRepository | None = None,
     storage: DeliveryStorage | None = None,
+    generate_and_seal_service: GenerateAndSealService | None = None,
 ) -> FastAPI:
     """Construct a dependency-injected application without external network clients."""
     selected_settings = settings or load_settings()
-    if repository is not None:
-        selected_repository = repository
-    elif selected_settings.supabase_url is not None:
-        selected_repository = SupabaseCertificateRepository.from_config(
-            selected_settings.require_supabase_config()
-        )
-    else:
-        selected_repository = MemoryCertificateRepository()
-    service = CertificateService(
-        selected_repository,
-        public_base_url=selected_settings.public_base_url or "https://firemark.invalid",
+    runtime = build_runtime(
+        selected_settings,
+        repository=repository,
         storage=storage,
-        delivery_ttl_seconds=selected_settings.delivery_ttl_seconds,
+        generate_and_seal_service=generate_and_seal_service,
     )
     app = FastAPI(
         title="FIREMARK Control Plane",
         version="0.1.0",
         description="Public Birth Certificates and verification-gated delivery.",
     )
-    app.state.certificate_service = service
+    app.state.settings = selected_settings
+    app.state.runtime = runtime
+    app.state.certificate_service = runtime.certificate_service
+    app.state.generate_and_seal_service = runtime.generate_and_seal_service
 
     @app.middleware("http")
     async def correlation_and_safe_logging(
@@ -109,5 +105,6 @@ def create_app(
     app.include_router(health.router)
     app.include_router(certificates.router)
     app.include_router(verify.router)
+    app.include_router(generate.router)
     app.include_router(delivery.router)
     return app

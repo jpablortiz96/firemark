@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, SecretStr, field_validator, model_validator
 
 Environment = Literal["local", "test", "staging", "production"]
+RepositoryBackend = Literal["memory", "supabase"]
 SupabaseKeyFamily = Literal[
     "SB_PUBLISHABLE",
     "SB_SECRET",
@@ -112,12 +113,33 @@ class LiveSupabaseControlPlaneConfig(BaseModel):
     delivery_ttl_seconds: int
 
 
+class GenerateAndSealConfig(BaseModel):
+    """Complete production configuration for Generate & Seal."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    repository_backend: Literal["supabase"]
+    admin_api_key: SecretStr
+    delivery_api_key: SecretStr
+    signing_private_key_b64: SecretStr
+    signing_public_key_b64: str
+    openai_api_key: SecretStr
+    openai_image_model: str
+    openai_image_size: str
+    generation_timeout_seconds: int
+    max_generated_image_bytes: int
+    public_base_url: str
+    b2: CompleteB2Config
+    supabase: SupabaseConfig
+
+
 class Settings(BaseModel):
     """Typed configuration without import-time credential requirements."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     environment: Environment = "local"
+    repository_backend: RepositoryBackend = "memory"
     base_url: str | None = None
     signing_key: SecretStr | None = None
     public_key: str | None = None
@@ -139,6 +161,15 @@ class Settings(BaseModel):
     supabase_service_role_key: SecretStr | None = None
     public_base_url: str | None = None
     delivery_ttl_seconds: int = 300
+    admin_api_key: SecretStr | None = None
+    delivery_api_key: SecretStr | None = None
+    signing_private_key_b64: SecretStr | None = None
+    signing_public_key_b64: str | None = None
+    openai_api_key: SecretStr | None = None
+    openai_image_model: str = "gpt-image-1.5"
+    openai_image_size: str = "1024x1024"
+    generation_timeout_seconds: int = 120
+    max_generated_image_bytes: int = 20 * 1024 * 1024
     gmi_api_key: SecretStr | None = None
     elevenlabs_api_key: SecretStr | None = None
     replicate_api_token: SecretStr | None = None
@@ -170,7 +201,7 @@ class Settings(BaseModel):
             raise ValueError("B2_ENDPOINT must not contain a path")
         return urlunsplit(("https", parsed.netloc, "", "", ""))
 
-    @field_validator("supabase_url", "public_base_url")
+    @field_validator("base_url", "supabase_url", "public_base_url")
     @classmethod
     def validate_external_url(cls, value: str | None) -> str | None:
         """Require credential-free HTTPS origins for external control-plane URLs."""
@@ -254,6 +285,75 @@ class Settings(BaseModel):
             raise ValueError("FIREMARK_DELIVERY_TTL_SECONDS must be between 60 and 900")
         return parsed
 
+    @field_validator("generation_timeout_seconds", mode="before")
+    @classmethod
+    def validate_generation_timeout(cls, value: object) -> object:
+        """Bound one provider request to 5 through 300 seconds."""
+        if isinstance(value, bool):
+            raise ValueError("FIREMARK_GENERATION_TIMEOUT_SECONDS must be between 5 and 300")
+        try:
+            parsed = int(value) if isinstance(value, (int, str)) else -1
+        except ValueError as exc:
+            raise ValueError(
+                "FIREMARK_GENERATION_TIMEOUT_SECONDS must be between 5 and 300"
+            ) from exc
+        if not 5 <= parsed <= 300:
+            raise ValueError("FIREMARK_GENERATION_TIMEOUT_SECONDS must be between 5 and 300")
+        return parsed
+
+    @field_validator("max_generated_image_bytes", mode="before")
+    @classmethod
+    def validate_generated_image_limit(cls, value: object) -> object:
+        """Bound generated image memory use to 1 through 50 MiB."""
+        if isinstance(value, bool):
+            raise ValueError("FIREMARK_MAX_GENERATED_IMAGE_BYTES must be between 1 and 50 MiB")
+        try:
+            parsed = int(value) if isinstance(value, (int, str)) else -1
+        except ValueError as exc:
+            raise ValueError(
+                "FIREMARK_MAX_GENERATED_IMAGE_BYTES must be between 1 and 50 MiB"
+            ) from exc
+        if not 1024 * 1024 <= parsed <= 50 * 1024 * 1024:
+            raise ValueError("FIREMARK_MAX_GENERATED_IMAGE_BYTES must be between 1 and 50 MiB")
+        return parsed
+
+    @field_validator("openai_image_model")
+    @classmethod
+    def validate_image_model(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", normalized):
+            raise ValueError("OPENAI_IMAGE_MODEL must be a safe nonblank model identifier")
+        return normalized
+
+    @field_validator(
+        "admin_api_key",
+        "delivery_api_key",
+        "signing_private_key_b64",
+        "openai_api_key",
+    )
+    @classmethod
+    def validate_private_value(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not value.get_secret_value().strip():
+            raise ValueError("Private API and signing values must not be blank")
+        return value
+
+    @field_validator("openai_image_size")
+    @classmethod
+    def validate_image_size(cls, value: str) -> str:
+        allowed = {
+            "auto",
+            "256x256",
+            "512x512",
+            "1024x1024",
+            "1536x1024",
+            "1024x1536",
+            "1792x1024",
+            "1024x1792",
+        }
+        if value not in allowed:
+            raise ValueError("OPENAI_IMAGE_SIZE is not supported")
+        return value
+
     @model_validator(mode="after")
     def reject_ambiguous_configuration(self) -> Settings:
         """Reject conflicting key sources and partial B2 credential groups."""
@@ -261,6 +361,10 @@ class Settings(BaseModel):
             raise ValueError("Configure only one private signing key source")
         if self.public_key is not None and self.public_key_file is not None:
             raise ValueError("Configure only one public signing key source")
+        if self.signing_key is not None and self.signing_private_key_b64 is not None:
+            raise ValueError("Configure only one direct private signing key value")
+        if self.public_key is not None and self.signing_public_key_b64 is not None:
+            raise ValueError("Configure only one direct public signing key value")
         if (self.supabase_url is None) != (self.supabase_service_role_key is None):
             raise ValueError("Supabase URL and service-role key must be configured together")
 
@@ -283,6 +387,25 @@ class Settings(BaseModel):
             == self.b2_vault_key_id.get_secret_value()
         ):
             raise ValueError("Assets and vault credentials must use different key IDs")
+        if self.signing_private_key_b64 is not None:
+            from api.firemark.signer import Ed25519Signer
+
+            supplied_public = self.signing_public_key_b64
+            try:
+                Ed25519Signer.from_private_key_base64(
+                    self.signing_private_key_b64.get_secret_value(), supplied_public
+                )
+            except ValueError as exc:
+                raise ValueError("FIREMARK signing key material is invalid or mismatched") from exc
+        if (
+            self.admin_api_key is not None
+            and self.delivery_api_key is not None
+            and hmac.compare_digest(
+                self.admin_api_key.get_secret_value(),
+                self.delivery_api_key.get_secret_value(),
+            )
+        ):
+            raise ValueError("Admin and delivery API keys must be different")
         return self
 
     def require_private_key_source(self) -> SecretStr | Path:
@@ -396,9 +519,49 @@ class Settings(BaseModel):
             delivery_ttl_seconds=self.delivery_ttl_seconds,
         )
 
+    def require_generate_and_seal_config(self) -> GenerateAndSealConfig:
+        """Require every external production dependency without constructing clients."""
+        if self.repository_backend != "supabase":
+            raise ValueError("Production Generate & Seal requires the supabase repository backend")
+        required = (
+            self.admin_api_key,
+            self.delivery_api_key,
+            self.signing_private_key_b64,
+            self.openai_api_key,
+            self.public_base_url,
+        )
+        if any(value is None for value in required):
+            raise ValueError("Complete production Generate & Seal configuration is required")
+        assert self.admin_api_key is not None
+        assert self.delivery_api_key is not None
+        assert self.signing_private_key_b64 is not None
+        assert self.openai_api_key is not None
+        assert self.public_base_url is not None
+        from api.firemark.signer import Ed25519Signer
+
+        signer = Ed25519Signer.from_private_key_base64(
+            self.signing_private_key_b64.get_secret_value(), self.signing_public_key_b64
+        )
+        return GenerateAndSealConfig(
+            repository_backend="supabase",
+            admin_api_key=self.admin_api_key,
+            delivery_api_key=self.delivery_api_key,
+            signing_private_key_b64=self.signing_private_key_b64,
+            signing_public_key_b64=signer.export_public_key_base64(),
+            openai_api_key=self.openai_api_key,
+            openai_image_model=self.openai_image_model,
+            openai_image_size=self.openai_image_size,
+            generation_timeout_seconds=self.generation_timeout_seconds,
+            max_generated_image_bytes=self.max_generated_image_bytes,
+            public_base_url=self.public_base_url,
+            b2=self.require_complete_b2_config(),
+            supabase=self.require_supabase_config(),
+        )
+
 
 _ENVIRONMENT_FIELDS = {
     "FIREMARK_ENV": "environment",
+    "FIREMARK_REPOSITORY_BACKEND": "repository_backend",
     "FIREMARK_BASE_URL": "base_url",
     "FIREMARK_SIGNING_KEY": "signing_key",
     "FIREMARK_PUBLIC_KEY": "public_key",
@@ -420,6 +583,15 @@ _ENVIRONMENT_FIELDS = {
     "SUPABASE_SERVICE_ROLE_KEY": "supabase_service_role_key",
     "FIREMARK_PUBLIC_BASE_URL": "public_base_url",
     "FIREMARK_DELIVERY_TTL_SECONDS": "delivery_ttl_seconds",
+    "FIREMARK_ADMIN_API_KEY": "admin_api_key",
+    "FIREMARK_DELIVERY_API_KEY": "delivery_api_key",
+    "FIREMARK_SIGNING_PRIVATE_KEY_B64": "signing_private_key_b64",
+    "FIREMARK_SIGNING_PUBLIC_KEY_B64": "signing_public_key_b64",
+    "OPENAI_API_KEY": "openai_api_key",
+    "OPENAI_IMAGE_MODEL": "openai_image_model",
+    "OPENAI_IMAGE_SIZE": "openai_image_size",
+    "FIREMARK_GENERATION_TIMEOUT_SECONDS": "generation_timeout_seconds",
+    "FIREMARK_MAX_GENERATED_IMAGE_BYTES": "max_generated_image_bytes",
     "GMI_API_KEY": "gmi_api_key",
     "ELEVENLABS_API_KEY": "elevenlabs_api_key",
     "REPLICATE_API_TOKEN": "replicate_api_token",

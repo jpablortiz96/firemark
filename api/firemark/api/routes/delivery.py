@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from api.firemark.api.auth import require_delivery_api_key
 from api.firemark.api.dependencies import get_certificate_service
 from api.firemark.api.errors import APIError, ErrorResponse
 from api.firemark.control_plane.models import (
@@ -28,6 +29,7 @@ router = APIRouter(prefix="/v1/delivery", tags=["delivery"])
         503: {"model": ErrorResponse},
     },
     operation_id="authorize_delivery",
+    dependencies=[Depends(require_delivery_api_key)],
 )
 def authorize_delivery(
     cert_id: str,

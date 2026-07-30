@@ -79,6 +79,13 @@ class MemoryCertificateRepository:
             None,
         )
 
+    def get_generation_request_fingerprint(self, run_id: str) -> str | None:
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        value = run.parameters_private.get("_firemark_request_fingerprint")
+        return value if isinstance(value, str) else None
+
     def _event_id(self, kind: str, index: int) -> UUID:
         return uuid5(_NAMESPACE, f"{kind}:{index}")
 

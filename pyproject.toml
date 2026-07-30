@@ -18,6 +18,8 @@ dependencies = [
   "fastapi==0.139.2",
   "genblaze-core==0.3.8",
   "genblaze-s3==0.3.6",
+  "httpx==0.28.1",
+  "openai==2.50.0",
   "cryptography",
   "pydantic",
   "python-dotenv",
@@ -29,7 +31,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "genblaze-cli==0.3.6",
-  "httpx==0.28.1",
   "mypy",
   "packaging",
   "Pillow",

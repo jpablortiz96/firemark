@@ -59,6 +59,8 @@ class CertificateRepository(Protocol):
 
     def get_certificate_by_sealed_sha256(self, sealed_sha256: str) -> CertificateRecord | None: ...
 
+    def get_generation_request_fingerprint(self, run_id: str) -> str | None: ...
+
     def record_verification(
         self,
         *,

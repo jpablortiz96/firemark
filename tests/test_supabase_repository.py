@@ -140,6 +140,22 @@ def test_reads_map_joined_private_aggregate_and_missing() -> None:
     assert ("eq", "sealed_sha256", SEALED) in client.calls
 
 
+def test_private_generation_fingerprint_is_read_without_public_projection() -> None:
+    client = FakeClient()
+    client.responses = [
+        {"parameters_private": {"_firemark_request_fingerprint": "a" * 64}},
+        {"parameters_private": {}},
+        None,
+    ]
+    repository = SupabaseCertificateRepository(
+        "https://project.supabase.co", SecretStr("secret"), client_factory=lambda *_: client
+    )
+    assert repository.get_generation_request_fingerprint("run-1") == "a" * 64
+    assert repository.get_generation_request_fingerprint("run-2") is None
+    assert repository.get_generation_request_fingerprint("missing") is None
+    assert ("select", "parameters_private") in client.calls
+
+
 def test_append_events_and_revoke_use_public_query_apis() -> None:
     _, certificate = _certificate_bundle()
     client = FakeClient()

@@ -139,6 +139,23 @@ class SupabaseCertificateRepository:
     def get_certificate_by_sealed_sha256(self, sealed_sha256: str) -> CertificateRecord | None:
         return self._find("sealed_sha256", sealed_sha256)
 
+    def get_generation_request_fingerprint(self, run_id: str) -> str | None:
+        client = self._get_client()
+        query = (
+            client.table("generation_runs")
+            .select("parameters_private")
+            .eq("run_id", run_id)
+            .maybe_single()
+        )
+        row = self._row(self._execute(query, "generation idempotency read"))
+        if row is None:
+            return None
+        parameters = row.get("parameters_private")
+        if not isinstance(parameters, Mapping):
+            return None
+        value = parameters.get("_firemark_request_fingerprint")
+        return str(value) if isinstance(value, str) else None
+
     def _insert_event(self, table: str, payload: dict[str, Any]) -> UUID:
         client = self._get_client()
         response = self._execute(client.table(table).insert(payload), f"{table} append")
