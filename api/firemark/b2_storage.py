@@ -1056,6 +1056,7 @@ def _locked_receipt(
     stage_callback: Callable[[str], None] | None = None,
     hash_verification_stage: str | None = None,
     retention_verification_stage: str | None = None,
+    retention_validation_stage: str | None = None,
     retry_sleep: Callable[[float], None] = time.sleep,
     retry_monotonic: Callable[[], float] = time.monotonic,
 ) -> LockedObjectReceipt:
@@ -1108,6 +1109,8 @@ def _locked_receipt(
         sleep=retry_sleep,
         monotonic=retry_monotonic,
     )
+    if stage_callback is not None and retention_validation_stage is not None:
+        stage_callback(retention_validation_stage)
     if not _retention_covers(state.retain_until, requested_retention):
         raise B2RetentionError("Confirmed retention is earlier than requested")
     return LockedObjectReceipt(
@@ -1132,6 +1135,7 @@ def verify_locked_object_exact(
     retry_monotonic: Callable[[], float] = time.monotonic,
     hash_verification_callback: Callable[[], None] | None = None,
     retention_verification_callback: Callable[[], None] | None = None,
+    retention_validation_callback: Callable[[], None] | None = None,
 ) -> tuple[LockedObjectReceipt, bytes]:
     """Verify one existing immutable version and active COMPLIANCE retention."""
     exact_version = _required_version_id(version_id)
@@ -1182,6 +1186,8 @@ def verify_locked_object_exact(
         sleep=retry_sleep,
         monotonic=retry_monotonic,
     )
+    if retention_validation_callback is not None:
+        retention_validation_callback()
     timestamp = (now or datetime.now(UTC)).astimezone(UTC)
     if retention.retain_until <= timestamp:
         raise B2RetentionExpiredError("B2 COMPLIANCE retention is expired")
@@ -1209,6 +1215,7 @@ def upload_locked_bytes(
     upload_stage: str | None = None,
     hash_verification_stage: str | None = None,
     retention_verification_stage: str | None = None,
+    retention_validation_stage: str | None = None,
     retry_sleep: Callable[[float], None] = time.sleep,
     retry_monotonic: Callable[[], float] = time.monotonic,
 ) -> LockedObjectReceipt:
@@ -1248,6 +1255,7 @@ def upload_locked_bytes(
             stage_callback=stage_callback,
             hash_verification_stage=hash_verification_stage,
             retention_verification_stage=retention_verification_stage,
+            retention_validation_stage=retention_validation_stage,
             retry_sleep=retry_sleep,
             retry_monotonic=retry_monotonic,
         )
@@ -1278,6 +1286,7 @@ def upload_locked_file(
     upload_stage: str | None = None,
     hash_verification_stage: str | None = None,
     retention_verification_stage: str | None = None,
+    retention_validation_stage: str | None = None,
     retry_sleep: Callable[[float], None] = time.sleep,
     retry_monotonic: Callable[[], float] = time.monotonic,
 ) -> LockedObjectReceipt:
@@ -1318,6 +1327,7 @@ def upload_locked_file(
             stage_callback=stage_callback,
             hash_verification_stage=hash_verification_stage,
             retention_verification_stage=retention_verification_stage,
+            retention_validation_stage=retention_validation_stage,
             retry_sleep=retry_sleep,
             retry_monotonic=retry_monotonic,
         )

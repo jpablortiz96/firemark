@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,9 +15,11 @@ import pytest
 from api.firemark.b2_storage import sealed_asset_key
 from api.firemark.generate_and_seal import _build_manifest
 from api.firemark.generate_checkpoint import (
+    CheckpointSerializationError,
     GenerateAndSealCheckpoint,
     checkpoint_object,
     read_checkpoint,
+    serialize_checkpoint_payload,
     write_checkpoint_atomic,
     write_private_evidence_atomic,
 )
@@ -26,6 +31,16 @@ from scripts import resume_generate_and_seal_checkpoint as resume
 from tests.conftest import FakeS3Client
 
 NOW = datetime(2026, 7, 30, 12, tzinfo=UTC)
+
+
+class SafeState(Enum):
+    READY = "ready"
+
+
+@dataclass(frozen=True)
+class FrozenEvidence:
+    recorded_at: datetime
+    path: Path
 
 
 def production_evidence() -> tuple[bytes, bytes, str]:
@@ -96,6 +111,73 @@ def test_atomic_checkpoint_round_trip_and_secret_exclusion(tmp_path: Path) -> No
     assert "api_key" not in serialized.lower()
     assert "presigned" not in serialized.lower()
     assert not list(tmp_path.glob(".checkpoint.json.*"))
+
+
+def test_checkpoint_serializer_supports_safe_runtime_types(tmp_path: Path) -> None:
+    checkpoint = make_checkpoint(tmp_path)
+    payload = serialize_checkpoint_payload(
+        {
+            "timestamp": NOW,
+            "state": SafeState.READY,
+            "path": tmp_path / "private.bin",
+            "items": ("one", None),
+            "dataclass": FrozenEvidence(NOW, tmp_path / "evidence.bin"),
+            "model": checkpoint,
+            "optional_version_id": None,
+        },
+        stage="checkpoint_after_vault_manifest",
+    )
+    decoded = json.loads(payload)
+    assert decoded["timestamp"] == "2026-07-30T12:00:00.000000Z"
+    assert decoded["state"] == "ready"
+    assert decoded["path"] == str(tmp_path / "private.bin")
+    assert decoded["items"] == ["one", None]
+    assert decoded["dataclass"]["recorded_at"].endswith("Z")
+    assert decoded["model"]["operation_state"] == "prepared"
+    assert decoded["optional_version_id"] is None
+
+
+def test_unsupported_checkpoint_value_raises_safe_typed_error() -> None:
+    raw_secret = "must-never-appear-in-checkpoint-error"
+
+    class UnsupportedSecret:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    with pytest.raises(CheckpointSerializationError) as captured:
+        serialize_checkpoint_payload(
+            {"sealed_asset": UnsupportedSecret(raw_secret)},
+            stage="checkpoint_after_vault_manifest",
+        )
+    error = captured.value
+    assert error.stage == "checkpoint_after_vault_manifest"
+    assert error.field_path == "$.sealed_asset"
+    assert error.value_type == "UnsupportedSecret"
+    assert raw_secret not in str(error)
+    assert raw_secret not in repr(error)
+
+
+@pytest.mark.parametrize(
+    ("value", "value_type", "field_path"),
+    [
+        (float("nan"), "float", "$.value"),
+        (datetime(2026, 7, 30, 12), "datetime", "$.value"),
+        ({1: "not-a-checkpoint-field"}, "int", "$.value[1]"),
+        (type("unsafe-type", (), {})(), "unsupported", "$.value"),
+    ],
+)
+def test_checkpoint_serializer_rejects_unsafe_values_safely(
+    value: object,
+    value_type: str,
+    field_path: str,
+) -> None:
+    with pytest.raises(CheckpointSerializationError) as captured:
+        serialize_checkpoint_payload({"value": value}, stage="unsafe stage containing secret")
+    error = captured.value
+    assert error.stage == "checkpoint_serialization"
+    assert error.field_path == field_path
+    assert error.value_type == value_type
+    assert "unsafe stage containing secret" not in str(error)
 
 
 def test_checkpoint_rejects_unsafe_identity_time_and_missing_version(tmp_path: Path) -> None:
@@ -284,6 +366,45 @@ def test_partial_exact_versions_are_required(tmp_path: Path) -> None:
     )
 
 
+def test_recovery_reuses_exact_vault_version_without_new_upload() -> None:
+    client = FakeS3Client()
+    payload = b"retained-existing-source"
+    digest = sha256_bytes(payload)
+    client.put_object(
+        Bucket="vault-test",
+        Key="vault/source.png",
+        Body=payload,
+        ContentType="image/png",
+        Metadata={"firemark-sha256": digest},
+        ObjectLockRetainUntilDate=datetime(2030, 1, 1, tzinfo=UTC),
+    )
+    put_count = [name for name, _ in client.calls].count("put_object")
+    receipt, downloaded = resume._verify_locked(
+        client,
+        bucket="vault-test",
+        key="vault/source.png",
+        version_id="test-version-1",
+        digest=digest,
+        max_bytes=1024,
+    )
+    assert receipt.version_id == "test-version-1"
+    assert downloaded == payload
+    assert [name for name, _ in client.calls].count("put_object") == put_count
+    exact_calls = [
+        values
+        for name, values in client.calls
+        if name in {"head_object", "get_object", "get_object_retention"}
+    ]
+    assert all(values["VersionId"] == "test-version-1" for values in exact_calls)
+
+
+def test_recovery_retention_comparison_accepts_safe_subsecond_normalization() -> None:
+    requested = datetime(2030, 1, 1, microsecond=500_000, tzinfo=UTC)
+    returned = requested.replace(microsecond=0)
+    assert resume._retention_covers(returned, requested)
+    assert not resume._retention_covers(requested - timedelta(seconds=1), requested)
+
+
 def test_identical_sealed_asset_is_reused_and_conflict_is_rejected() -> None:
     client = FakeS3Client()
     payload = b"sealed-test-bytes"
@@ -321,6 +442,44 @@ def test_identical_sealed_asset_is_reused_and_conflict_is_rejected() -> None:
             digest=digest,
             content_type="image/png",
             kind="sealed",
+        )
+
+
+def test_recovery_completes_atomic_registration_and_is_idempotent(tmp_path: Path) -> None:
+    checkpoint = make_checkpoint(tmp_path)
+    calls: list[str] = []
+    resume._complete_registration(
+        None,
+        checkpoint,
+        lambda: calls.append("atomic_supabase_registration"),
+    )
+    assert calls == ["atomic_supabase_registration"]
+
+    existing = SimpleNamespace(
+        cert_id=checkpoint.cert_id,
+        asset_id=checkpoint.asset_id,
+        run_id=checkpoint.run_id,
+        source_sha256=checkpoint.source_sha256,
+        sealed_sha256=checkpoint.sealed_sha256,
+        canonical_hash=checkpoint.canonical_hash,
+        signer_key_id=checkpoint.signer_key_id,
+    )
+    resume._complete_registration(
+        existing,
+        checkpoint,
+        lambda: pytest.fail("identical registration must be reused"),
+    )
+    with pytest.raises(resume.RecoveryError, match="CONFLICTING_CERTIFICATE"):
+        resume._complete_registration(
+            SimpleNamespace(**{**existing.__dict__, "asset_id": "conflicting-asset"}),
+            checkpoint,
+            lambda: None,
+        )
+    with pytest.raises(resume.RecoveryError, match="REGISTRATION_FAILURE"):
+        resume._complete_registration(
+            None,
+            checkpoint,
+            lambda: (_ for _ in ()).throw(RuntimeError("private database detail")),
         )
 
 

@@ -221,6 +221,64 @@ def test_complete_custody_workflow_verifies_four_objects(tmp_path: Path) -> None
     assert len(vault.objects) == 2
 
 
+def test_manifest_retention_normalization_and_checkpoint_stage_order(tmp_path: Path) -> None:
+    source, source_digest, manifest_bytes, canonical_hash = _fixture_manifest(tmp_path)
+
+    class TruncatedRetentionS3(FakeS3Client):
+        def get_object_retention(self, **kwargs: object) -> dict[str, object]:
+            response = super().get_object_retention(**kwargs)
+            retention = response["Retention"]
+            assert isinstance(retention, dict)
+            returned = retention["RetainUntilDate"]
+            assert isinstance(returned, datetime)
+            retention["RetainUntilDate"] = returned.replace(microsecond=0)
+            return response
+
+    assets = FakeS3Client()
+    vault = TruncatedRetentionS3()
+    timeline: list[str] = []
+    requested = datetime(2030, 1, 1, microsecond=500_000, tzinfo=UTC)
+
+    def persisted(partials: tuple[object, ...]) -> None:
+        timeline.append(f"checkpoint:{len(partials)}")
+
+    receipt = execute_b2_custody(
+        assets_client=assets,
+        vault_client=vault,
+        assets_bucket="assets-test",
+        vault_bucket="vault-test",
+        source_path=source,
+        manifest_bytes=manifest_bytes,
+        source_sha256=source_digest,
+        canonical_hash=canonical_hash,
+        run_id=LOCAL_RUN_ID,
+        cert_id="cert-retention-normalization",
+        extension="png",
+        retention_until=requested,
+        source_content_type="image/png",
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+        stage_callback=timeline.append,
+        persistence_callback=persisted,
+    )
+    assert receipt.custody_verified is True
+    assert receipt.vault_manifest.retention_until.microsecond == 0
+    assert requested > receipt.vault_manifest.retention_until
+    assert timeline[-5:] == [
+        "vault_manifest_hash_verification",
+        "vault_manifest_retention_readback",
+        "vault_manifest_retention_validation",
+        "checkpoint_after_vault_manifest",
+        "checkpoint:4",
+    ]
+    manifest_retention_calls = [
+        values
+        for name, values in vault.calls
+        if name == "get_object_retention" and values["Key"].startswith("vault/manifests/")
+    ]
+    assert len(manifest_retention_calls) == 1
+    assert manifest_retention_calls[0]["VersionId"] == receipt.vault_manifest.version_id
+
+
 def test_workflow_rejects_source_and_manifest_conflicts(tmp_path: Path) -> None:
     source, source_digest, manifest_bytes, canonical_hash = _fixture_manifest(tmp_path)
     common = {

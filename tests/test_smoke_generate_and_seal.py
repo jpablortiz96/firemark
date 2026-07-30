@@ -47,7 +47,9 @@ def test_help_contract_and_exact_live_stage_list() -> None:
         "vault_source_retention_verification",
         "vault_manifest_upload",
         "vault_manifest_hash_verification",
-        "vault_manifest_retention_verification",
+        "vault_manifest_retention_readback",
+        "vault_manifest_retention_validation",
+        "checkpoint_after_vault_manifest",
         "sealed_asset_upload",
         "sealed_asset_hash_verification",
         "custody_receipt_construction",
@@ -75,7 +77,7 @@ def test_live_with_incomplete_configuration_fails_safely_before_clients(
     output = capsys.readouterr().out
     assert output == (
         "FAIL: configuration_validation "
-        "(CATEGORY=CONFIGURATION_ERROR)\n"
+        "(CATEGORY=CONFIGURATION_ERROR, EXCEPTION_CLASS=ValueError)\n"
     )
     assert secret not in output
 
@@ -151,9 +153,7 @@ def test_full_smoke_failure_keeps_exact_provider_stage_and_safe_code(
             self.callback("provider_generation")  # type: ignore[operator]
             raise GenerationProviderError("authentication")
 
-    def fake_runtime(
-        incoming: object, *, production_overrides: dict[str, object]
-    ) -> object:
+    def fake_runtime(incoming: object, *, production_overrides: dict[str, object]) -> object:
         assert incoming is settings
         return SimpleNamespace(
             generate_and_seal_service=Service(production_overrides["stage_callback"])
@@ -205,3 +205,43 @@ def test_full_smoke_preserves_exact_b2_stage_category_and_partial_versions(
     assert "B2_CODE=BadDigest" in output
     assert "VERSION_ID=source-version-exact" in output
     assert "private raw service failure" not in output
+
+
+def test_checkpoint_failure_reports_exact_safe_stage_type_without_raw_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from api.firemark.generate_checkpoint import CheckpointSerializationError
+
+    tracker = smoke.StageTracker()
+    tracker.begin("checkpoint_after_vault_manifest")
+    secret = "must-not-appear-in-checkpoint-diagnostic"
+    error = CheckpointSerializationError(
+        stage="checkpoint_after_vault_manifest",
+        field_path="$.vault_manifest.retention_until",
+        value_type="UnsupportedSecret",
+    )
+    error.__cause__ = ValueError(secret)
+    tracker.fail(error)
+    output = capsys.readouterr().out
+    assert output.endswith(
+        "FAIL: checkpoint_after_vault_manifest "
+        "(CATEGORY=CHECKPOINT_SERIALIZATION_ERROR, "
+        "EXCEPTION_CLASS=CheckpointSerializationError, "
+        "FIELD_PATH=$.vault_manifest.retention_until, "
+        "VALUE_TYPE=UnsupportedSecret)\n"
+    )
+    assert secret not in output
+
+
+def test_local_retention_validation_failure_has_exact_stage_and_allowlisted_class(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tracker = smoke.StageTracker()
+    tracker.begin("vault_manifest_retention_validation")
+    tracker.fail(ValueError("private validation detail"))
+    output = capsys.readouterr().out
+    assert output.endswith(
+        "FAIL: vault_manifest_retention_validation "
+        "(CATEGORY=LOCAL_VALIDATION_ERROR, EXCEPTION_CLASS=ValueError)\n"
+    )
+    assert "private validation detail" not in output

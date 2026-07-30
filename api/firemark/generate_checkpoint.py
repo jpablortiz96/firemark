@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
+from collections.abc import Mapping
+from dataclasses import fields, is_dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +22,22 @@ CHECKPOINT_SCHEMA_VERSION: Literal["firemark.generate-and-seal-checkpoint.v1"] =
 DEFAULT_CHECKPOINT_PATH = Path(".artifacts/generate-and-seal-checkpoint.json")
 DEFAULT_PRIVATE_ROOT = Path(".artifacts/generate-and-seal-private")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
+_SAFE_FIELD_PATH = re.compile(
+    r"^\$(?:(?:\.[A-Za-z_][A-Za-z0-9_.-]{0,127})|(?:\[\d+\])|(?:\.<unknown>))*$"
+)
+
+
+class CheckpointSerializationError(RuntimeError):
+    """Safe typed failure that never retains the unsupported checkpoint value."""
+
+    def __init__(self, *, stage: str, field_path: str, value_type: str) -> None:
+        self.stage = stage if _SAFE_ID.fullmatch(stage) else "checkpoint_serialization"
+        self.field_path = field_path if _SAFE_FIELD_PATH.fullmatch(field_path) else "$.<unknown>"
+        self.value_type = value_type if value_type.isidentifier() else "unsupported"
+        super().__init__(
+            f"Checkpoint serialization failed at {self.field_path} for type {self.value_type}"
+        )
 
 
 class CheckpointObject(BaseModel):
@@ -120,18 +140,113 @@ def checkpoint_object(
     )
 
 
-def write_checkpoint_atomic(path: Path, checkpoint: GenerateAndSealCheckpoint) -> None:
-    """Atomically replace one ignored checkpoint without rendering its contents."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (
+def _safe_field_path(parent: str, field: object) -> str:
+    if isinstance(field, int):
+        return f"{parent}[{field}]"
+    if isinstance(field, str) and _SAFE_PATH_SEGMENT.fullmatch(field):
+        return f"{parent}.{field}"
+    return f"{parent}.<unknown>"
+
+
+def checkpoint_json_value(
+    value: object,
+    *,
+    stage: str = "checkpoint_serialization",
+    field_path: str = "$",
+) -> object:
+    """Convert allowlisted checkpoint values without leaking unsupported raw values."""
+    if value is None:
+        return value
+    if isinstance(value, Enum):
+        return checkpoint_json_value(value.value, stage=stage, field_path=field_path)
+    if isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        raise CheckpointSerializationError(stage=stage, field_path=field_path, value_type="float")
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise CheckpointSerializationError(
+                stage=stage, field_path=field_path, value_type="datetime"
+            )
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, BaseModel):
+        return checkpoint_json_value(
+            value.model_dump(mode="python"),
+            stage=stage,
+            field_path=field_path,
+        )
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: checkpoint_json_value(
+                getattr(value, field.name),
+                stage=stage,
+                field_path=_safe_field_path(field_path, field.name),
+            )
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise CheckpointSerializationError(
+                    stage=stage,
+                    field_path=_safe_field_path(field_path, key),
+                    value_type=type(key).__name__,
+                )
+            result[key] = checkpoint_json_value(
+                item,
+                stage=stage,
+                field_path=_safe_field_path(field_path, key),
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        return [
+            checkpoint_json_value(
+                item,
+                stage=stage,
+                field_path=_safe_field_path(field_path, index),
+            )
+            for index, item in enumerate(value)
+        ]
+    value_type = type(value).__name__
+    if not value_type.isidentifier():
+        value_type = "unsupported"
+    raise CheckpointSerializationError(
+        stage=stage,
+        field_path=field_path,
+        value_type=value_type,
+    )
+
+
+def serialize_checkpoint_payload(
+    checkpoint: object, *, stage: str = "checkpoint_serialization"
+) -> bytes:
+    """Serialize one safe checkpoint payload to deterministic UTF-8 JSON."""
+    normalized = checkpoint_json_value(checkpoint, stage=stage)
+    return (
         json.dumps(
-            checkpoint.model_dump(mode="json"),
+            normalized,
             ensure_ascii=True,
             indent=2,
             sort_keys=True,
         ).encode("utf-8")
         + b"\n"
     )
+
+
+def write_checkpoint_atomic(
+    path: Path,
+    checkpoint: GenerateAndSealCheckpoint,
+    *,
+    stage: str = "checkpoint_serialization",
+) -> None:
+    """Atomically replace one ignored checkpoint without rendering its contents."""
+    payload = serialize_checkpoint_payload(checkpoint, stage=stage)
+    path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     os.close(descriptor)
     temporary = Path(name)

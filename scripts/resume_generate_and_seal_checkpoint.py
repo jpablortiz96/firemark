@@ -9,6 +9,7 @@ import os
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -73,7 +74,9 @@ STAGES = (
     "vault_source_validation",
     "vault_source_retention_verification",
     "vault_manifest_validation",
-    "vault_manifest_retention_verification",
+    "vault_manifest_retention_readback",
+    "vault_manifest_retention_validation",
+    "checkpoint_after_vault_manifest",
     "public_capsule_reconstruction",
     "sealed_asset_reconstruction",
     "sealed_hash_verification",
@@ -175,6 +178,14 @@ def _database_secret_scan(repository: Any, result: Any, secrets: Sequence[str]) 
 
 def _fail(category: str) -> NoReturn:
     raise RecoveryError(category)
+
+
+def _retention_covers(returned: datetime, requested: datetime) -> bool:
+    normalized_returned = returned.astimezone(UTC)
+    normalized_requested = requested.astimezone(UTC)
+    return normalized_returned >= normalized_requested or (
+        normalized_requested - normalized_returned < timedelta(seconds=1)
+    )
 
 
 def validate_manifest_evidence(
@@ -310,6 +321,7 @@ def _verify_locked(
     digest: str,
     max_bytes: int,
     retention_verification_callback: Callable[[], None] | None = None,
+    retention_validation_callback: Callable[[], None] | None = None,
 ) -> tuple[LockedObjectReceipt, bytes]:
     try:
         return verify_locked_object_exact(
@@ -320,6 +332,7 @@ def _verify_locked(
             version_id=version_id,
             max_bytes=max_bytes,
             retention_verification_callback=retention_verification_callback,
+            retention_validation_callback=retention_validation_callback,
         )
     except B2EventualConsistencyTimeout:
         _fail("RETENTION_EVENTUAL_CONSISTENCY_TIMEOUT")
@@ -494,6 +507,24 @@ def _existing_certificate_matches(certificate: Any, checkpoint: GenerateAndSealC
     )
 
 
+def _complete_registration(
+    existing: Any,
+    checkpoint: GenerateAndSealCheckpoint,
+    register: Callable[[], object],
+) -> None:
+    """Complete one atomic registration or accept identical existing evidence."""
+    if existing is not None:
+        if not _existing_certificate_matches(existing, checkpoint):
+            _fail("CONFLICTING_CERTIFICATE")
+        return
+    try:
+        register()
+    except RecoveryError:
+        raise
+    except Exception:
+        _fail("REGISTRATION_FAILURE")
+
+
 def run_live(report_path: Path, *, force: bool) -> int:
     tracker = StageTracker()
     try:
@@ -544,7 +575,9 @@ def run_live(report_path: Path, *, force: bool) -> int:
         )
         if remote_source != source:
             _fail("HASH_MISMATCH")
-        if vault_source.retention_until < checkpoint.requested_retention_until:
+        if not _retention_covers(
+            vault_source.retention_until, checkpoint.requested_retention_until
+        ):
             _fail("RETENTION_EXPIRED")
 
         manifest_key, manifest_version = _partial_version(checkpoint, object_kind="manifest")
@@ -557,17 +590,35 @@ def run_live(report_path: Path, *, force: bool) -> int:
             digest=manifest_sha256,
             max_bytes=config.max_generated_image_bytes,
             retention_verification_callback=lambda: tracker.begin(
-                "vault_manifest_retention_verification"
+                "vault_manifest_retention_readback"
+            ),
+            retention_validation_callback=lambda: tracker.begin(
+                "vault_manifest_retention_validation"
             ),
         )
         if remote_manifest != manifest_bytes:
             _fail("HASH_MISMATCH")
-        if vault_manifest.retention_until < checkpoint.requested_retention_until:
+        if not _retention_covers(
+            vault_manifest.retention_until, checkpoint.requested_retention_until
+        ):
             _fail("RETENTION_EXPIRED")
         if vault_source.version_id is None or vault_manifest.version_id is None:
             _fail("VERSION_ID_MISSING")
         vault_source_version = vault_source.version_id
         vault_manifest_version = vault_manifest.version_id
+        tracker.begin("checkpoint_after_vault_manifest")
+        checkpoint = checkpoint.model_copy(
+            update={
+                "vault_source": checkpoint_object(
+                    vault_source, bucket_role="vault", object_kind="source"
+                ),
+                "vault_manifest": checkpoint_object(
+                    vault_manifest, bucket_role="vault", object_kind="manifest"
+                ),
+                "stage_results": tuple(tracker.completed),
+            }
+        )
+        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, checkpoint, stage=tracker.current)
 
         tracker.begin("public_capsule_reconstruction")
         signer = Ed25519Signer.from_private_key_base64(
@@ -627,7 +678,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 "stage_results": tuple(tracker.completed),
             }
         )
-        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, checkpoint)
+        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, checkpoint, stage=tracker.current)
         tracker.begin("sealed_asset_upload")
         sealed_key = sealed_asset_key(checkpoint.sealed_sha256)
         sealed_exact_version = (
@@ -662,7 +713,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 "stage_results": tuple(tracker.completed),
             }
         )
-        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, checkpoint)
+        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, checkpoint, stage=tracker.current)
 
         tracker.begin("envelope_construction")
         envelope = SealEnvelopeV1(
@@ -749,23 +800,24 @@ def run_live(report_path: Path, *, force: bool) -> int:
             delivery_ttl_seconds=live_supabase.delivery_ttl_seconds,
         )
         tracker.begin("supabase_registration")
-        if existing is None:
-            try:
-                service.register_certificate(
-                    generation_run=generation_run,
-                    asset=asset,
-                    custody=custody,
-                    envelope=envelope,
-                    signature_b64=signed.signature,
-                    signer_public_key_b64=signer.export_public_key_base64(),
-                    public_manifest=capsule.model_dump(mode="json"),
-                    canonical_hash=checkpoint.canonical_hash,
-                    cert_id=checkpoint.cert_id,
-                    asset_id=checkpoint.asset_id,
-                    run_id=checkpoint.run_id,
-                )
-            except Exception:
-                _fail("REGISTRATION_FAILURE")
+        registration_checkpoint = checkpoint
+        _complete_registration(
+            existing,
+            registration_checkpoint,
+            lambda: service.register_certificate(
+                generation_run=generation_run,
+                asset=asset,
+                custody=custody,
+                envelope=envelope,
+                signature_b64=signed.signature,
+                signer_public_key_b64=signer.export_public_key_base64(),
+                public_manifest=capsule.model_dump(mode="json"),
+                canonical_hash=registration_checkpoint.canonical_hash,
+                cert_id=registration_checkpoint.cert_id,
+                asset_id=registration_checkpoint.asset_id,
+                run_id=registration_checkpoint.run_id,
+            ),
+        )
         checkpoint = checkpoint.model_copy(
             update={
                 "operation_state": (
@@ -774,7 +826,7 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 "stage_results": tuple(tracker.completed),
             }
         )
-        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, checkpoint)
+        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, checkpoint, stage=tracker.current)
         tracker.begin("public_certificate_projection")
         if service.get_public_certificate(checkpoint.cert_id) is None:
             _fail("VERIFICATION_FAILED")
@@ -855,11 +907,12 @@ def run_live(report_path: Path, *, force: bool) -> int:
                 "stage_results": tuple(tracker.completed),
             }
         )
-        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, updated)
+        write_checkpoint_atomic(DEFAULT_CHECKPOINT_PATH, updated, stage=tracker.current)
         tracker.begin("safe_report")
         write_checkpoint_atomic(
             DEFAULT_CHECKPOINT_PATH,
             updated.model_copy(update={"stage_results": tuple(tracker.completed)}),
+            stage=tracker.current,
         )
         report = {
             "schema_version": "firemark.generate-and-seal-recovery-report.v1",

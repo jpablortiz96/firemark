@@ -20,6 +20,14 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _retention_covers(returned: datetime, requested: datetime) -> bool:
+    normalized_returned = _utc(returned)
+    normalized_requested = _utc(requested)
+    return normalized_returned >= normalized_requested or (
+        normalized_requested - normalized_returned < timedelta(seconds=1)
+    )
+
+
 def _json_default(value: object) -> str:
     if isinstance(value, datetime):
         return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -167,9 +175,11 @@ class B2CustodyReceipt(BaseModel):
             raise ValueError("Vault receipts must use one vault bucket")
         if self.assets_source.bucket == self.vault_source.bucket:
             raise ValueError("Assets and vault receipts must use different buckets")
-        if self.requested_retention_until > self.vault_source.retention_until:
+        if not _retention_covers(self.vault_source.retention_until, self.requested_retention_until):
             raise ValueError("Vault source retention is earlier than requested")
-        if self.requested_retention_until > self.vault_manifest.retention_until:
+        if not _retention_covers(
+            self.vault_manifest.retention_until, self.requested_retention_until
+        ):
             raise ValueError("Vault manifest retention is earlier than requested")
         if self.custody_verified and not (
             self.vault_source.retention_verified and self.vault_manifest.retention_verified
@@ -283,6 +293,7 @@ def execute_b2_custody(
     current_stage = "vault_source_upload"
     bucket_role = "assets"
     object_kind = "source"
+    timestamp = _utc(now or datetime.now(UTC))
 
     def begin(stage: str, *, role: str, kind: str) -> None:
         nonlocal current_stage, bucket_role, object_kind
@@ -401,7 +412,7 @@ def execute_b2_custody(
                 key=locked_source_key,
                 version_id=existing_vault_source.version_id,
             )
-            if state.retain_until + timedelta(seconds=1) < retention_until.astimezone(UTC):
+            if not _retention_covers(state.retain_until, retention_until):
                 raise B2CustodyWorkflowError("Existing vault source retention conflicts")
             vault_source = LockedObjectReceipt(
                 **existing_vault_source.model_dump(),
@@ -434,7 +445,8 @@ def execute_b2_custody(
                 stage_callback=lambda stage: begin(stage, role="vault", kind="manifest"),
                 upload_stage="vault_manifest_upload",
                 hash_verification_stage="vault_manifest_hash_verification",
-                retention_verification_stage="vault_manifest_retention_verification",
+                retention_verification_stage="vault_manifest_retention_readback",
+                retention_validation_stage="vault_manifest_retention_validation",
             )
         else:
             begin("vault_manifest_hash_verification", role="vault", kind="manifest")
@@ -445,14 +457,15 @@ def execute_b2_custody(
                 expected_sha256=manifest_sha256,
                 version_id=existing_vault_manifest.version_id,
             )
-            begin("vault_manifest_retention_verification", role="vault", kind="manifest")
+            begin("vault_manifest_retention_readback", role="vault", kind="manifest")
             state = read_object_retention(
                 vault_client,
                 bucket=vault_bucket,
                 key=locked_manifest_key,
                 version_id=existing_vault_manifest.version_id,
             )
-            if state.retain_until + timedelta(seconds=1) < retention_until.astimezone(UTC):
+            begin("vault_manifest_retention_validation", role="vault", kind="manifest")
+            if not _retention_covers(state.retain_until, retention_until):
                 raise B2CustodyWorkflowError("Existing vault manifest retention conflicts")
             vault_manifest = LockedObjectReceipt(
                 **existing_vault_manifest.model_dump(),
@@ -465,6 +478,18 @@ def execute_b2_custody(
                 "vault", "manifest", locked_manifest_key, vault_manifest.version_id, True
             )
         )
+        custody_receipt = B2CustodyReceipt(
+            source_sha256=source_sha256,
+            canonical_hash=canonical_hash,
+            assets_source=assets_source,
+            assets_manifest=assets_manifest,
+            vault_source=vault_source,
+            vault_manifest=vault_manifest,
+            requested_retention_until=retention_until,
+            created_at=timestamp,
+            custody_verified=True,
+        )
+        begin("checkpoint_after_vault_manifest", role="vault", kind="manifest")
         if persistence_callback is not None:
             persistence_callback(tuple(partial_objects))
     except Exception as exc:
@@ -509,15 +534,4 @@ def execute_b2_custody(
             partial_objects=tuple(partial_objects),
         ) from exc
 
-    timestamp = _utc(now or datetime.now(UTC))
-    return B2CustodyReceipt(
-        source_sha256=source_sha256,
-        canonical_hash=canonical_hash,
-        assets_source=assets_source,
-        assets_manifest=assets_manifest,
-        vault_source=vault_source,
-        vault_manifest=vault_manifest,
-        requested_retention_until=retention_until,
-        created_at=timestamp,
-        custody_verified=True,
-    )
+    return custody_receipt

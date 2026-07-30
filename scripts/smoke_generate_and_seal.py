@@ -13,6 +13,11 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+from botocore.exceptions import (  # type: ignore[import-untyped]
+    ClientError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 from dotenv import load_dotenv
 
 from api.firemark.app import create_app
@@ -36,6 +41,7 @@ from api.firemark.generate_checkpoint import (
     DEFAULT_CHECKPOINT_PATH,
     DEFAULT_PRIVATE_ROOT,
     CheckpointPartialObject,
+    CheckpointSerializationError,
     GenerateAndSealCheckpoint,
     checkpoint_object,
     read_checkpoint,
@@ -69,7 +75,9 @@ STAGES = (
     "vault_source_retention_verification",
     "vault_manifest_upload",
     "vault_manifest_hash_verification",
-    "vault_manifest_retention_verification",
+    "vault_manifest_retention_readback",
+    "vault_manifest_retention_validation",
+    "checkpoint_after_vault_manifest",
     "sealed_asset_upload",
     "sealed_asset_hash_verification",
     "custody_receipt_construction",
@@ -105,6 +113,29 @@ _PROVIDER_CATEGORIES = {
 }
 
 
+def _safe_exception_details(
+    exc: BaseException,
+) -> tuple[str | None, CheckpointSerializationError | None]:
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, CheckpointSerializationError):
+            return "CheckpointSerializationError", current
+        if isinstance(current, ClientError):
+            return "ClientError", None
+        if isinstance(current, EndpointConnectionError):
+            return "EndpointConnectionError", None
+        if isinstance(current, ReadTimeoutError):
+            return "ReadTimeoutError", None
+        if isinstance(current, ValueError):
+            return "ValueError", None
+        if isinstance(current, TypeError):
+            return "TypeError", None
+        if isinstance(current, OSError):
+            return "OSError", None
+        current = current.__cause__
+    return None, None
+
+
 class StageTracker:
     """Advance an ordered stage before work and emit only safe status lines."""
 
@@ -127,6 +158,9 @@ class StageTracker:
         print(f"PASS: {self.current}")
 
     def fail(self, exc: Exception) -> None:
+        exception_class, checkpoint_error = _safe_exception_details(exc)
+        if checkpoint_error is not None and checkpoint_error.stage in STAGES:
+            self.current = checkpoint_error.stage
         if isinstance(exc, B2CustodyWorkflowError) and exc.stage in STAGES:
             self.current = exc.stage
         provider_code = exc.code if isinstance(exc, GenerationProviderError) else None
@@ -143,17 +177,39 @@ class StageTracker:
             failure = classify_b2_failure(exc, stage=self.current)
             b2_category = failure.category
             b2_code = failure.service_error_code
-        category = (
-            _PROVIDER_CATEGORIES.get(provider_code, "UNKNOWN_SAFE_ERROR")
-            if provider_code is not None
-            else b2_category
-            if b2_category is not None
-            else "CONFIGURATION_ERROR"
-            if self.current == "configuration_validation"
-            else "LOCAL_ADAPTER_ERROR"
-            if isinstance(exc, LiveSmokeError)
-            else "UNKNOWN_SAFE_ERROR"
+        elif exception_class in {
+            "ClientError",
+            "EndpointConnectionError",
+            "ReadTimeoutError",
+        }:
+            failure = classify_b2_failure(exc, stage=self.current)
+            b2_category = failure.category
+            b2_code = failure.service_error_code
+        local_category = (
+            "CHECKPOINT_SERIALIZATION_ERROR"
+            if checkpoint_error is not None
+            else "LOCAL_VALIDATION_ERROR"
+            if exception_class == "ValueError"
+            else "LOCAL_TYPE_ERROR"
+            if exception_class == "TypeError"
+            else "LOCAL_IO_ERROR"
+            if exception_class == "OSError"
+            else None
         )
+        if provider_code is not None:
+            category = _PROVIDER_CATEGORIES.get(provider_code, "UNKNOWN_SAFE_ERROR")
+        elif b2_category is not None and b2_category != "UNKNOWN_SAFE_ERROR":
+            category = b2_category
+        elif self.current == "configuration_validation":
+            category = "CONFIGURATION_ERROR"
+        elif local_category is not None:
+            category = local_category
+        elif b2_category is not None:
+            category = b2_category
+        elif isinstance(exc, LiveSmokeError):
+            category = "LOCAL_ADAPTER_ERROR"
+        else:
+            category = "UNKNOWN_SAFE_ERROR"
         suffix = f", PROVIDER_CODE={provider_code}" if provider_code is not None else ""
         if b2_code is not None:
             suffix += f", B2_CODE={b2_code}"
@@ -161,6 +217,13 @@ class StageTracker:
             suffix += f", BUCKET_ROLE={bucket_role}"
         if object_kind is not None:
             suffix += f", OBJECT_KIND={object_kind}"
+        if exception_class is not None:
+            suffix += f", EXCEPTION_CLASS={exception_class}"
+        if checkpoint_error is not None:
+            suffix += (
+                f", FIELD_PATH={checkpoint_error.field_path}, "
+                f"VALUE_TYPE={checkpoint_error.value_type}"
+            )
         print(f"FAIL: {self.current} (CATEGORY={category}{suffix})")
         if isinstance(exc, B2CustodyWorkflowError):
             for item in exc.partial_objects:
@@ -206,6 +269,7 @@ class Capture:
         write_checkpoint_atomic(
             self.checkpoint_path,
             checkpoint.model_copy(update={"stage_results": stages}),
+            stage=self.tracker.current if self.tracker is not None else "checkpoint_serialization",
         )
 
     def checkpoint_event(self, event: str, values: dict[str, Any]) -> None:
