@@ -227,6 +227,21 @@ event, and revokes the smoke certificate. It makes no provider or B2 request. Th
 credentials, private evidence, signed envelopes, prompts, parameters, manifests, authorization
 headers, and URLs.
 
+If that live checkpoint has already persisted its atomic bundle and event rows but stops before
+revocation, do not repeat the original smoke. Resume only the existing unambiguous bundle:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\resume_supabase_control_plane_checkpoint.py
+D:\firemark\.venv\Scripts\python.exe scripts\resume_supabase_control_plane_checkpoint.py --live `
+  --output-report .artifacts\supabase-control-plane-report.json --force
+```
+
+The resume command performs no registration RPC and inserts no verification or delivery event. It
+validates existing row counts and the public allowlist, revokes through the service-role repository,
+proves the revoked Verify Gate result locally, scans only the smoke rows for secret material, and
+writes the final safe report. An identical prior checkpoint revocation is accepted idempotently;
+missing, ambiguous, or differently revoked bundles fail closed.
+
 The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
 The settings loader reads process environment variables explicitly; it does not automatically load
 the `.env` file. Only explicitly live CLI checkpoints load the ignored repository `.env`.

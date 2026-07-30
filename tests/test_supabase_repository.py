@@ -180,6 +180,7 @@ def test_append_events_and_revoke_use_public_query_apis() -> None:
     )
     assert verification_id == delivery_id == UUID(EVENT_ID)
     assert revoked.certificate_status == "revoked"
+    assert ("maybe_single",) not in client.calls
     persisted = repr(client.calls)
     assert "download_url" not in persisted and "presigned" not in persisted
 

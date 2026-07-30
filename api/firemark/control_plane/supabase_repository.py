@@ -208,7 +208,7 @@ class SupabaseCertificateRepository:
         revoked_at: datetime,
     ) -> CertificateRecord:
         client = self._get_client()
-        response = self._execute(
+        query = (
             client.table("certificates")
             .update(
                 {
@@ -219,9 +219,8 @@ class SupabaseCertificateRepository:
             )
             .eq("cert_id", cert_id)
             .select("*,assets(*,custody_records(*))")
-            .maybe_single(),
-            "certificate revocation",
         )
+        response = self._execute(query, "certificate revocation")
         row = self._row(response)
         if row is None:
             raise CertificateNotFoundError("Certificate not found")

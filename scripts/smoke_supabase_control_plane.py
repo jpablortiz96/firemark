@@ -8,7 +8,8 @@ import importlib.metadata
 import json
 import os
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -297,6 +298,25 @@ def _execute(builder: Any, stage: str, reason_code: str) -> Any:
         return builder.execute()
     except Exception as exc:
         raise LiveCheckpointError(stage, reason_code) from exc
+
+
+@contextmanager
+def stage_boundary(stage: str) -> Iterator[None]:
+    """Normalize any stage-local failure without exposing raw service details."""
+    try:
+        yield
+    except LiveCheckpointError:
+        raise
+    except RepositoryError as exc:
+        raise LiveCheckpointError(stage, "REPOSITORY_OPERATION_FAILED") from exc
+    except AttributeError as exc:
+        raise LiveCheckpointError(stage, "ADAPTER_CONTRACT_FAILURE") from exc
+    except ValidationError as exc:
+        raise LiveCheckpointError(stage, "RESPONSE_VALIDATION_FAILED") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise LiveCheckpointError(stage, "INVALID_STAGE_RESPONSE") from exc
+    except Exception as exc:
+        raise LiveCheckpointError(stage, "SAFE_UNEXPECTED_STAGE_FAILURE") from exc
 
 
 def _rows(response: Any, stage: str, reason_code: str) -> list[Mapping[str, Any]]:
@@ -818,75 +838,81 @@ def run_checkpoint(
         raise LiveCheckpointError("delivery_event_append", "PRESIGNED_URL_VALUE_PRESENT")
     _record_stage(stages, "delivery_event_append")
 
-    revocation_reason = "SMOKE_CHECKPOINT_REVOCATION"
-    revoked = repository.revoke_certificate(
-        evidence.envelope.cert_id,
-        reason=revocation_reason,
-        revoked_at=timestamp + timedelta(seconds=3),
-    )
-    if (
-        revoked.certificate_status != "revoked"
-        or revoked.revoked_at is None
-        or revoked.revocation_reason != revocation_reason
-    ):
-        raise LiveCheckpointError("certificate_revocation", "REVOCATION_NOT_PERSISTED")
+    with stage_boundary("certificate_revocation"):
+        revocation_reason = "SMOKE_CHECKPOINT_REVOCATION"
+        revoked = repository.revoke_certificate(
+            evidence.envelope.cert_id,
+            reason=revocation_reason,
+            revoked_at=timestamp + timedelta(seconds=3),
+        )
+        if (
+            revoked.certificate_status != "revoked"
+            or revoked.revoked_at is None
+            or revoked.revocation_reason != revocation_reason
+        ):
+            raise LiveCheckpointError("certificate_revocation", "REVOCATION_NOT_PERSISTED")
     _record_stage(stages, "certificate_revocation")
 
-    revoked_rows = _public_rpc_rows(
-        publishable_client, evidence.envelope.cert_id, "revoked_public_projection"
-    )
-    if len(revoked_rows) != 1 or revoked_rows[0].get("certificate_status") != "revoked":
-        raise LiveCheckpointError("revoked_public_projection", "PUBLIC_REVOCATION_MISMATCH")
-    local_repository = MemoryCertificateRepository()
-    local_repository.register_certificate_bundle(
-        evidence.generation_run, evidence.asset, evidence.custody, revoked
-    )
-    local_verification = CertificateService(local_repository).verify(
-        VerificationRequest(cert_id=evidence.envelope.cert_id, presented_sha256=SEALED_SHA256),
-        now=timestamp + timedelta(seconds=4),
-    )
-    if local_verification.verified or local_verification.status != "certificate_revoked":
-        raise LiveCheckpointError("revoked_public_projection", "REVOKED_CERTIFICATE_AUTHORIZED")
+    with stage_boundary("revoked_public_projection"):
+        revoked_rows = _public_rpc_rows(
+            publishable_client, evidence.envelope.cert_id, "revoked_public_projection"
+        )
+        if len(revoked_rows) != 1 or revoked_rows[0].get("certificate_status") != "revoked":
+            raise LiveCheckpointError("revoked_public_projection", "PUBLIC_REVOCATION_MISMATCH")
+        local_repository = MemoryCertificateRepository()
+        local_repository.register_certificate_bundle(
+            evidence.generation_run, evidence.asset, evidence.custody, revoked
+        )
+        local_verification = CertificateService(local_repository).verify(
+            VerificationRequest(cert_id=evidence.envelope.cert_id, presented_sha256=SEALED_SHA256),
+            now=timestamp + timedelta(seconds=4),
+        )
+        if local_verification.verified or local_verification.status != "certificate_revoked":
+            raise LiveCheckpointError(
+                "revoked_public_projection", "REVOKED_CERTIFICATE_AUTHORIZED"
+            )
     _record_stage(stages, "revoked_public_projection")
 
-    smoke_filters = {
-        "generation_runs": ("run_id", evidence.generation_run.run_id),
-        "assets": ("asset_id", evidence.asset.asset_id),
-        "custody_records": ("asset_id", evidence.asset.asset_id),
-        "certificates": ("cert_id", evidence.envelope.cert_id),
-        "verification_events": ("id", str(verification.verification_event_id)),
-        "delivery_events": ("id", str(delivery_id)),
-    }
-    rows_by_table = {
-        table: _query_rows(secret_client, table, field, value, "database_secret_scan")
-        for table, (field, value) in smoke_filters.items()
-    }
-    if any(len(rows) != 1 for rows in rows_by_table.values()):
-        raise LiveCheckpointError("database_secret_scan", "SMOKE_ROW_COUNT_MISMATCH")
-    scanned_rows = require_safe_database_rows(
-        rows_by_table,
-        credentials=(
-            config.publishable_key,
-            config.service_role_key.get_secret_value(),
-        ),
-    )
+    with stage_boundary("database_secret_scan"):
+        smoke_filters = {
+            "generation_runs": ("run_id", evidence.generation_run.run_id),
+            "assets": ("asset_id", evidence.asset.asset_id),
+            "custody_records": ("asset_id", evidence.asset.asset_id),
+            "certificates": ("cert_id", evidence.envelope.cert_id),
+            "verification_events": ("id", str(verification.verification_event_id)),
+            "delivery_events": ("id", str(delivery_id)),
+        }
+        rows_by_table = {
+            table: _query_rows(secret_client, table, field, value, "database_secret_scan")
+            for table, (field, value) in smoke_filters.items()
+        }
+        if any(len(rows) != 1 for rows in rows_by_table.values()):
+            raise LiveCheckpointError("database_secret_scan", "SMOKE_ROW_COUNT_MISMATCH")
+        scanned_rows = require_safe_database_rows(
+            rows_by_table,
+            credentials=(
+                config.publishable_key,
+                config.service_role_key.get_secret_value(),
+            ),
+        )
     _record_stage(stages, "database_secret_scan")
 
-    final_counts = {table: len(rows) for table, rows in rows_by_table.items()}
-    report_stages = [
-        *stages,
-        {"name": "write_safe_report", "result": "PASS"},
-    ]
-    report = build_safe_report(
-        config=config,
-        evidence=evidence,
-        stages=report_stages,
-        row_counts=final_counts,
-        rls_results=rls_results,
-        scanned_rows=scanned_rows,
-    )
-    if output_report is not None:
-        _write_report(output_report.resolve(), report, force=force)
+    with stage_boundary("write_safe_report"):
+        final_counts = {table: len(rows) for table, rows in rows_by_table.items()}
+        report_stages = [
+            *stages,
+            {"name": "write_safe_report", "result": "PASS"},
+        ]
+        report = build_safe_report(
+            config=config,
+            evidence=evidence,
+            stages=report_stages,
+            row_counts=final_counts,
+            rls_results=rls_results,
+            scanned_rows=scanned_rows,
+        )
+        if output_report is not None:
+            _write_report(output_report.resolve(), report, force=force)
     _record_stage(stages, "write_safe_report")
     return report
 

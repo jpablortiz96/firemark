@@ -26,13 +26,21 @@ class FakeServiceError(RuntimeError):
 
 
 class FakeBackend:
-    def __init__(self, *, rls_mode: str = "empty", partial_registration: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        rls_mode: str = "empty",
+        partial_registration: bool = False,
+        fail_update: bool = False,
+    ) -> None:
         self.rls_mode = rls_mode
         self.partial_registration = partial_registration
+        self.fail_update = fail_update
         self.tables: dict[str, list[dict[str, Any]]] = {
             table: [] for table in smoke.PRIVATE_TABLES
         }
         self.client_keys: list[str] = []
+        self.operations: list[tuple[Any, ...]] = []
 
     def client_factory(self, url: str, key: str) -> FakeClient:
         assert url == "https://project.supabase.co"
@@ -84,9 +92,11 @@ class FakeClient:
         self.publishable = publishable
 
     def table(self, name: str) -> FakeBuilder:
+        self.backend.operations.append(("table", name, self.publishable))
         return FakeBuilder(self, "table", name)
 
     def rpc(self, name: str, payload: dict[str, Any]) -> FakeBuilder:
+        self.backend.operations.append(("rpc", name, self.publishable))
         return FakeBuilder(self, "rpc", name, payload=payload)
 
 
@@ -105,31 +115,46 @@ class FakeBuilder:
         self.payload = payload
         self.selection = "*"
         self.filters: list[tuple[str, str]] = []
+        self.like_filters: list[tuple[str, str]] = []
         self.insert_value: dict[str, Any] | None = None
         self.update_value: dict[str, Any] | None = None
         self.single = False
+        self.limit_value: int | None = None
+        self.order_value: tuple[str, bool] | None = None
 
     def select(self, value: str) -> FakeBuilder:
         self.selection = value
         return self
 
     def limit(self, value: int) -> FakeBuilder:
-        assert value in {1, 2}
+        self.limit_value = value
         return self
 
     def eq(self, field: str, value: str) -> FakeBuilder:
         self.filters.append((field, value))
         return self
 
+    def like(self, field: str, value: str) -> FakeBuilder:
+        self.like_filters.append((field, value))
+        return self
+
+    def order(self, field: str, *, desc: bool = False) -> FakeBuilder:
+        self.order_value = (field, desc)
+        return self
+
     def maybe_single(self) -> FakeBuilder:
+        if self.update_value is not None:
+            raise AttributeError("mutation builders do not support maybe_single")
         self.single = True
         return self
 
     def insert(self, payload: dict[str, Any]) -> FakeBuilder:
+        self.client.backend.operations.append(("insert", self.name))
         self.insert_value = payload
         return self
 
     def update(self, payload: dict[str, Any]) -> FakeBuilder:
+        self.client.backend.operations.append(("update", self.name))
         self.update_value = payload
         return self
 
@@ -162,7 +187,17 @@ class FakeBuilder:
             for row in rows
             if all(str(row.get(field)) == str(value) for field, value in self.filters)
         ]
+        for field, pattern in self.like_filters:
+            prefix = pattern.removesuffix("%")
+            selected = [row for row in selected if str(row.get(field, "")).startswith(prefix)]
+        if self.order_value is not None:
+            field, desc = self.order_value
+            selected.sort(key=lambda row: str(row.get(field, "")), reverse=desc)
+        if self.limit_value is not None:
+            selected = selected[: self.limit_value]
         if self.update_value is not None:
+            if self.client.backend.fail_update:
+                raise FakeServiceError("PGRST_TEST")
             for row in selected:
                 row.update(deepcopy(self.update_value))
         result = [self._joined_certificate(row) for row in selected]
@@ -381,6 +416,23 @@ def test_partial_atomic_result_is_rejected() -> None:
         not backend.tables[table]
         for table in ("assets", "custody_records", "certificates")
     )
+
+
+def test_failure_after_delivery_is_normalized_to_certificate_revocation_stage(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    backend = FakeBackend(fail_update=True)
+    with pytest.raises(smoke.LiveCheckpointError) as raised:
+        smoke.run_checkpoint(
+            live_settings(),
+            client_factory=backend.client_factory,
+            identifier="revocation-failure",
+        )
+    assert raised.value.stage == "certificate_revocation"
+    assert raised.value.reason_code == "REPOSITORY_OPERATION_FAILED"
+    output = capsys.readouterr().out
+    assert "delivery_event_append: PASS" in output
+    assert "checkpoint_internal" not in output
 
 
 def test_public_projection_requires_exact_allowlist_and_rejects_private_leaks() -> None:
