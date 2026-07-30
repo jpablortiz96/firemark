@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 
-import { VerifyForm } from "@/components/verify-form";
+import { VerifyExperience } from "@/components/verify-experience";
 
 export const metadata: Metadata = {
   title: "Verify Gate",
-  description: "Verify a FIREMARK certificate, signature, custody evidence, and sealed SHA-256.",
+  description: "Verify a sealed PNG locally without uploading it, then run FIREMARK Verify Gate.",
   alternates: { canonical: "/verify" },
 };
 
@@ -18,9 +18,9 @@ export default async function VerifyPage({
     <section className="verify-page">
       <div className="page-intro">
         <span className="section-kicker">PUBLIC VERIFICATION</span>
-        <p>One evidence check. One clear decision. No private provenance leaves FIREMARK.</p>
+        <p>Local file evidence. One clear backend decision. The selected image never leaves your browser.</p>
       </div>
-      <VerifyForm initialCertId={query.cert_id ?? ""} initialSha256={query.sha256 ?? ""} />
+      <VerifyExperience initialCertId={query.cert_id ?? ""} initialSha256={query.sha256 ?? ""} />
     </section>
   );
 }

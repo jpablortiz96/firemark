@@ -33,8 +33,15 @@ function apiBaseUrl(): string {
   return normalized.replace(/\/$/, "");
 }
 
-async function fetchWithTimeout(path: string, init?: RequestInit): Promise<Response> {
+async function fetchWithTimeout(
+  path: string,
+  init?: RequestInit,
+  externalSignal?: AbortSignal,
+): Promise<Response> {
   const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  externalSignal?.addEventListener("abort", cancel, { once: true });
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     return await fetch(`${apiBaseUrl()}${path}`, {
@@ -49,6 +56,7 @@ async function fetchWithTimeout(path: string, init?: RequestInit): Promise<Respo
     throw new SafeApiError("network", "NETWORK_FAILURE");
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", cancel);
   }
 }
 
@@ -144,18 +152,25 @@ export async function getCertificate(certId: string): Promise<CertificateLookup>
   }
 }
 
-export async function verifyCertificate(request: VerificationRequest): Promise<VerificationResult> {
+export async function verifyCertificate(
+  request: VerificationRequest,
+  signal?: AbortSignal,
+): Promise<VerificationResult> {
   if (!isCertificateId(request.cert_id)) {
     throw new SafeApiError("malformed", "CERTIFICATE_ID_INVALID");
   }
   if (request.presented_sha256 && !isSha256(request.presented_sha256)) {
     throw new SafeApiError("malformed", "SHA256_INVALID");
   }
-  const response = await fetchWithTimeout("/v1/verify", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
+  const response = await fetchWithTimeout(
+    "/v1/verify",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+    signal,
+  );
   if (!response.ok) {
     const code = await safeErrorCode(response);
     throw new SafeApiError(response.status === 422 ? "malformed" : "unavailable", code);

@@ -68,6 +68,10 @@ FIREMARK_PUBLIC_SITE_URL
 Only the API base is browser-visible. `FIREMARK_DELIVERY_API_KEY` is server-only and must exactly
 match Railway. No credential may use a `NEXT_PUBLIC_` name.
 
+FIREMARK Lens and Proof Pack require no additional environment variable. Lens runs entirely in the
+browser and uses the existing public API base. Proof Pack executes in the existing Vercel server
+runtime, performs only the anonymous certificate lookup, and does not read the delivery bearer.
+
 ## Deployment order
 
 1. Create the Railway service from this repository with the repository root as its root directory.
@@ -104,7 +108,9 @@ shutdown window. The hostname is never hardcoded.
 
 No `web/vercel.json` is needed: Vercel natively detects Next.js and the package already defines the
 production build. Keep the project Root Directory at `web`. Dynamic certificate rendering and the
-delivery Route Handler remain server-capable; do not export the application as static files.
+delivery and Proof Pack Route Handlers remain server-capable; do not export the application as
+static files. `fflate@0.8.3` and `qrcode-svg@1.1.0` are exact production dependencies installed by
+`npm ci`; QR generation contacts no external service.
 
 Next.js config applies `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and a CSP
 with `frame-ancestors 'none'`. The CSP allows the inline framework bootstrap required by the
@@ -131,6 +137,12 @@ Live mode reuses `.artifacts/generate-and-seal-report.json` and its existing cer
 no OpenAI request, creates no object or certificate, performs no registration, and mutates no
 certificate. Public verification and authenticated delivery append only their normal audit events.
 The short-lived download URL exists only in memory and is excluded from output and the safe report.
+
+Before deployed smoke, manually confirm the Lens privacy boundary: select a known sealed PNG,
+observe automatic certificate discovery and the eight layers, and use browser network inspection
+to confirm the only verification body is `{cert_id, presented_sha256}`. Download one Proof Pack and
+confirm its five public entries. Never use a production user's file for the tamper demonstration;
+use only the committed test/demo fixture workflow.
 
 ## Rollback
 

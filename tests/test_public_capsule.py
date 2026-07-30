@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
 import struct
 import zlib
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -139,3 +142,23 @@ def test_truncated_trailing_and_non_text_reserved_chunks_are_rejected() -> None:
     png = _TINY_PNG[:-12] + chunk + _TINY_PNG[-12:]
     with pytest.raises(PublicCapsuleError, match="unsupported"):
         extract_public_capsule_png(png)
+
+
+def test_typescript_cross_language_fixture_is_generated_by_backend_contract() -> None:
+    fixture_path = (
+        Path(__file__).resolve().parents[1]
+        / "web"
+        / "src"
+        / "test"
+        / "fixtures"
+        / "public-capsule-v1.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    expected = FiremarkPublicCapsuleV1.model_validate(fixture["capsule"])
+    sealed = embed_public_capsule_png(_TINY_PNG, expected)
+    assert fixture["canonical_json"] == expected.canonical_bytes().decode("ascii")
+    assert fixture["sealed_png_base64"] == base64.b64encode(sealed).decode("ascii")
+    assert fixture["source_png_base64"] == base64.b64encode(_TINY_PNG).decode("ascii")
+    assert fixture["sealed_sha256"] == hashlib.sha256(sealed).hexdigest()
+    assert extract_public_capsule_png(sealed) == expected
+    assert "sealed_sha256" not in fixture["capsule"]

@@ -20,8 +20,8 @@ const capabilities = [
   {
     index: "03",
     title: "Verify Gate",
-    description: "Release the private asset only when status, signature, custody, and hash all pass.",
-    proof: "Verification first → delivery second",
+    description: "Inspect a sealed PNG locally, then release only when every backend trust layer passes.",
+    proof: "Zero-upload Lens → verification → delivery",
   },
 ] as const;
 
@@ -93,8 +93,8 @@ export default function HomePage() {
         <div>
           <span className="section-kicker">VERIFY GATE</span>
           <h2 id="gate-title">Delivery is a decision, not a link.</h2>
-          <p>The browser presents a certificate ID and sealed hash. FIREMARK checks status, signature, envelope, custody references, and byte identity. Only a verified result can ask the server for a short-lived private download.</p>
-          <Link className="text-link" href="/verify">Open Verify Gate <span aria-hidden="true">→</span></Link>
+          <p>FIREMARK Lens reads the PNG, extracts its public capsule, and calculates its sealed hash locally. Only the certificate ID and hash reach Verify Gate, where status, signature, custody references, and byte identity determine delivery.</p>
+          <Link className="text-link" href="/verify">Open FIREMARK Lens <span aria-hidden="true">→</span></Link>
         </div>
         <div className="gate-console" aria-hidden="true">
           <div className="console-head"><span>VERIFY_GATE / 01</span><i /><i /><i /></div>
@@ -119,8 +119,8 @@ export default function HomePage() {
       <section className="final-cta">
         <span className="section-kicker">EVIDENCE BEFORE DELIVERY</span>
         <h2>Know exactly what you are about to trust.</h2>
-        <p>Run Verify Gate against a FIREMARK certificate and the sealed asset hash.</p>
-        <Link className="button button-primary" href="/verify">Verify an asset</Link>
+        <p>Drop a sealed PNG into FIREMARK Lens. The image never leaves your browser.</p>
+        <Link className="button button-primary" href="/verify">Verify without uploading</Link>
       </section>
     </>
   );

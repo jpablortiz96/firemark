@@ -63,8 +63,9 @@ zero-network.
 
 Completed milestones are repository foundation, Trust Kernel, SealEnvelopeV1, Genblaze
 provenance, B2 Custody and live COMPLIANCE proof, FastAPI Control Plane, Supabase schema and live
-verification, live Generate & Seal, and the local public web experience. Remaining work is
-owner-operated deployment, demo recording, and hackathon submission.
+verification, live Generate & Seal, the local public web experience, FIREMARK Lens, and Public
+Proof Pack export. Remaining work is owner-operated deployment, demo recording, and hackathon
+submission.
 
 ## Control Plane
 
@@ -165,11 +166,41 @@ repeats verification.
 | Certificate | `/certificate/[certId]` | Redacted public certificate with trust summary and technical details. |
 | Verify Gate | `/verify` | Certificate and optional sealed-hash verification. |
 | Delivery proxy | `POST /api/delivery/[certId]` | Server-only authenticated delivery exchange. |
+| Proof Pack | `GET /api/proof-pack/[certId]` | Ephemeral ZIP containing public verification evidence. |
 
 The typed frontend client validates certificate IDs, SHA-256 digests, safe response shapes, public
 manifest fields, and URL schemes. Requests have bounded timeouts and normalized errors; raw
 backend exceptions are not shown. Short-lived delivery URLs remain only in the successful browser
 response and component memory. They are not logged or written to storage.
+
+### FIREMARK Lens and Public Proof Packs
+
+FIREMARK Lens makes file verification the primary `/verify` experience. The browser accepts only
+PNG files up to 25 MiB, reads PNG chunks and CRCs locally, extracts the exact
+`FiremarkPublicCapsuleV1` canonical `tEXt` payload, and calculates the complete file SHA-256 through
+Web Crypto. A Web Worker performs hashing when available, with a main-thread Web Crypto fallback.
+The selected bytes, filename, local path, and calculated evidence are never uploaded, logged, or
+persisted. Only `{cert_id, presented_sha256}` is sent to the existing public Verify API.
+
+Lens reports eight independent layers: file format, embedded capsule, sealed hash, certificate
+presence, Ed25519 signature, certificate status, B2 custody reference, and delivery eligibility.
+Local parsing never claims to prove remote custody; the final decision comes from Verify Gate.
+Missing or malformed capsules stop before any API call, while modified, revoked, and unregistered
+assets remain blocked.
+
+An active Birth Certificate offers `Download Proof Pack`. Its server-side route fetches only the
+public certificate projection and creates an in-memory ZIP containing `certificate.json`, a text
+summary, Ed25519 public key, locally generated SVG QR code, and verification instructions. It
+fetches no media, uses no backend bearer, creates no presigned URL, and persists nothing.
+
+Three-minute demo flow:
+
+1. Open a public Birth Certificate and download its Proof Pack.
+2. Open `/verify`, show the local-processing privacy badge, and drop the valid sealed PNG.
+3. Show the automatically discovered certificate, local hash, eight PASS layers, and enabled delivery.
+4. Select the one-byte-modified demo fixture and show hash mismatch with delivery blocked.
+5. Select the no-capsule PNG and show that Lens stops locally without calling Verify Gate.
+6. Open the Proof Pack and show its five public-only entries and offline QR code.
 
 FastAPI CORS is driven by `FIREMARK_ALLOWED_ORIGINS`, a strict JSON list. HTTPS origins are
 required except for explicit `localhost`, `127.0.0.1`, or `::1` development origins. Wildcards,

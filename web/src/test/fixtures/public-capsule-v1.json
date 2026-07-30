@@ -1,0 +1,17 @@
+{
+  "canonical_json": "{\"asset_id\":\"firemark-asset-cross-language\",\"canonical_hash\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"cert_id\":\"firemark-cert-cross-language\",\"issued_at\":\"2026-07-30T12:00:00.000000Z\",\"run_id\":\"firemark-run-cross-language\",\"schema_version\":\"firemark.public-capsule.v1\",\"signer_key_id\":\"firemark-ed25519-cross-language\",\"source_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"verify_url\":\"https://verify.firemark.test/v1/certificates/firemark-cert-cross-language\"}",
+  "capsule": {
+    "asset_id": "firemark-asset-cross-language",
+    "canonical_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "cert_id": "firemark-cert-cross-language",
+    "issued_at": "2026-07-30T12:00:00Z",
+    "run_id": "firemark-run-cross-language",
+    "schema_version": "firemark.public-capsule.v1",
+    "signer_key_id": "firemark-ed25519-cross-language",
+    "source_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "verify_url": "https://verify.firemark.test/v1/certificates/firemark-cert-cross-language"
+  },
+  "sealed_png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAIedEVYdGZpcmVtYXJrLnB1YmxpYy1jYXBzdWxlAHsiYXNzZXRfaWQiOiJmaXJlbWFyay1hc3NldC1jcm9zcy1sYW5ndWFnZSIsImNhbm9uaWNhbF9oYXNoIjoiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsImNlcnRfaWQiOiJmaXJlbWFyay1jZXJ0LWNyb3NzLWxhbmd1YWdlIiwiaXNzdWVkX2F0IjoiMjAyNi0wNy0zMFQxMjowMDowMC4wMDAwMDBaIiwicnVuX2lkIjoiZmlyZW1hcmstcnVuLWNyb3NzLWxhbmd1YWdlIiwic2NoZW1hX3ZlcnNpb24iOiJmaXJlbWFyay5wdWJsaWMtY2Fwc3VsZS52MSIsInNpZ25lcl9rZXlfaWQiOiJmaXJlbWFyay1lZDI1NTE5LWNyb3NzLWxhbmd1YWdlIiwic291cmNlX3NoYTI1NiI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJ2ZXJpZnlfdXJsIjoiaHR0cHM6Ly92ZXJpZnkuZmlyZW1hcmsudGVzdC92MS9jZXJ0aWZpY2F0ZXMvZmlyZW1hcmstY2VydC1jcm9zcy1sYW5ndWFnZSJ9Gr+gHAAAAABJRU5ErkJggg==",
+  "sealed_sha256": "6e7516befc3e8a67965ce5554b8bc0c35a3dbbf66a2511299dcc8282ac73345f",
+  "source_png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+}

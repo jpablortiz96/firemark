@@ -77,10 +77,6 @@ export function VerifyForm({ initialCertId = "", initialSha256 = "" }: { initial
           spellCheck={false}
           placeholder="64 lowercase hexadecimal characters"
         />
-        <div className="upload-placeholder" aria-disabled="true">
-          <span aria-hidden="true">↥</span>
-          <div><strong>Media upload verification</strong><small>Coming in a future release</small></div>
-        </div>
         <button className="button button-primary submit-button" type="submit" disabled={loading}>
           {loading ? "Verifying evidence…" : "Run Verify Gate"}
         </button>

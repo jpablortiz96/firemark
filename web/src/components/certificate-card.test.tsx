@@ -14,6 +14,10 @@ describe("public Birth Certificate", () => {
     expect(screen.getByText(CERT_ID)).toBeInTheDocument();
     expect(screen.getByText(SEALED_SHA)).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /Copy/i }).length).toBeGreaterThan(4);
+    expect(screen.getByRole("link", { name: "Download Proof Pack" })).toHaveAttribute(
+      "href",
+      `/api/proof-pack/${CERT_ID}`,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Copy Certificate ID value" }));
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(CERT_ID);
   });

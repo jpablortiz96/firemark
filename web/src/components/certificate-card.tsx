@@ -79,6 +79,13 @@ export function CertificateCard({ certificate }: { certificate: PublicCertificat
         >
           Verify this asset
         </Link>
+        <a
+          className="button button-secondary"
+          href={`/api/proof-pack/${encodeURIComponent(certificate.cert_id)}`}
+          download={`firemark-proof-${certificate.cert_id}.zip`}
+        >
+          Download Proof Pack
+        </a>
         <span>Verification is independent of certificate display.</span>
       </div>
     </article>
