@@ -64,7 +64,7 @@ zero-network.
 Completed milestones are repository foundation, Trust Kernel, SealEnvelopeV1, Genblaze
 provenance, B2 Custody and live COMPLIANCE proof, FastAPI Control Plane, Supabase schema and live
 verification, live Generate & Seal, and the local public web experience. Remaining work is
-deployment, demo recording, and hackathon submission.
+owner-operated deployment, demo recording, and hackathon submission.
 
 ## Control Plane
 
@@ -567,7 +567,28 @@ The historical B2 Custody smoke uses a local fixture and therefore does not prov
 generation by itself. The completed Generate & Seal checkpoint provides separate live evidence for
 the combined path, but neither that checkpoint nor the local web build claims that the complete
 application is deployed. The responsive public frontend, Birth Certificate experience, Verify Gate,
-and secure delivery proxy are implemented and tested locally. Deployment, demo recording, and the
-hackathon submission remain pending. B2 custody spans multiple objects and is not cross-object
-atomic; a registration failure can leave safe, billable partial storage that must be inspected
-before operational cleanup.
+and secure delivery proxy are implemented and tested locally. The deployment layer is ready, but
+the remote Railway and Vercel deployments, demo recording, and hackathon submission remain pending.
+B2 custody spans multiple objects and is not cross-object atomic; a registration failure can leave
+safe, billable partial storage that must be inspected before operational cleanup.
+
+## Production deployment readiness
+
+The repository includes a non-root Python 3.12 Docker image and supported Railway configuration for
+the FastAPI backend, security headers for the Next.js frontend, zero-network CI gates, a safe
+environment inventory, and a read-only deployed-stack smoke that reuses the completed certificate.
+No production service has been deployed by this repository checkpoint.
+
+Follow [the production deployment runbook](docs/deployment.md) for the exact Railway-first then
+Vercel sequence, required variables, CORS update, rollback, and safe smoke procedure. The Vercel
+project root is `web/`; the Railway health check is `/healthz`. Review readiness and non-live smoke
+locally with:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\check_production_readiness.py
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_deployed_stack.py
+```
+
+The second command constructs no HTTP or external-service client and exits with informational code
+2. Live deployed verification must be run only after both final HTTPS domains are configured. Demo
+recording and hackathon submission remain pending.

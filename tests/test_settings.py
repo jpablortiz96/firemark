@@ -28,9 +28,11 @@ ENVIRONMENT_VARIABLES = (
     "B2_ASSETS_BUCKET",
     "B2_ASSETS_KEY_ID",
     "B2_ASSETS_APP_KEY",
+    "B2_ASSETS_APPLICATION_KEY",
     "B2_VAULT_BUCKET",
     "B2_VAULT_KEY_ID",
     "B2_VAULT_APP_KEY",
+    "B2_VAULT_APPLICATION_KEY",
     "FIREMARK_VAULT_RETENTION_DAYS",
     "FIREMARK_PRESIGNED_URL_TTL_SECONDS",
     "SUPABASE_URL",
@@ -150,6 +152,37 @@ def test_environment_loader_uses_new_separate_credentials(monkeypatch: pytest.Mo
     for name, value in mapping.items():
         monkeypatch.setenv(name, str(value))
     assert load_settings().require_complete_b2_config().vault.retention_days == 90
+
+
+def test_environment_loader_accepts_production_application_key_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = complete_values()
+    mapping = {
+        "B2_ENDPOINT": values["b2_endpoint"],
+        "B2_REGION": values["b2_region"],
+        "B2_ASSETS_BUCKET": values["b2_assets_bucket"],
+        "B2_ASSETS_KEY_ID": values["b2_assets_key_id"],
+        "B2_ASSETS_APPLICATION_KEY": values["b2_assets_app_key"],
+        "B2_VAULT_BUCKET": values["b2_vault_bucket"],
+        "B2_VAULT_KEY_ID": values["b2_vault_key_id"],
+        "B2_VAULT_APPLICATION_KEY": values["b2_vault_app_key"],
+        "FIREMARK_VAULT_RETENTION_DAYS": "90",
+    }
+    for name, value in mapping.items():
+        monkeypatch.setenv(name, str(value))
+    complete = load_settings().require_complete_b2_config()
+    assert complete.assets.app_key.get_secret_value() == values["b2_assets_app_key"]
+    assert complete.vault.app_key.get_secret_value() == values["b2_vault_app_key"]
+
+
+def test_environment_loader_rejects_conflicting_application_key_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("B2_ASSETS_APPLICATION_KEY", "new-value")
+    monkeypatch.setenv("B2_ASSETS_APP_KEY", "different-legacy-value")
+    with pytest.raises(ValueError, match="Conflicting environment aliases"):
+        load_settings()
 
 
 @pytest.mark.parametrize(

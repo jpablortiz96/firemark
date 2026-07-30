@@ -637,10 +637,8 @@ _ENVIRONMENT_FIELDS = {
     "B2_REGION": "b2_region",
     "B2_ASSETS_BUCKET": "b2_assets_bucket",
     "B2_ASSETS_KEY_ID": "b2_assets_key_id",
-    "B2_ASSETS_APP_KEY": "b2_assets_app_key",
     "B2_VAULT_BUCKET": "b2_vault_bucket",
     "B2_VAULT_KEY_ID": "b2_vault_key_id",
-    "B2_VAULT_APP_KEY": "b2_vault_app_key",
     "FIREMARK_VAULT_RETENTION_DAYS": "vault_retention_days",
     "FIREMARK_PRESIGNED_URL_TTL_SECONDS": "presigned_url_ttl_seconds",
     "SUPABASE_URL": "supabase_url",
@@ -662,6 +660,11 @@ _ENVIRONMENT_FIELDS = {
     "REPLICATE_API_TOKEN": "replicate_api_token",
 }
 
+_ENVIRONMENT_ALIASES = {
+    "b2_assets_app_key": ("B2_ASSETS_APPLICATION_KEY", "B2_ASSETS_APP_KEY"),
+    "b2_vault_app_key": ("B2_VAULT_APPLICATION_KEY", "B2_VAULT_APP_KEY"),
+}
+
 
 def load_settings() -> Settings:
     """Build settings from environment variables without network access."""
@@ -670,4 +673,14 @@ def load_settings() -> Settings:
         for environment_name, field_name in _ENVIRONMENT_FIELDS.items()
         if (value := os.getenv(environment_name)) not in (None, "")
     }
+    for field_name, environment_names in _ENVIRONMENT_ALIASES.items():
+        configured = [
+            value
+            for environment_name in environment_names
+            if (value := os.getenv(environment_name)) not in (None, "")
+        ]
+        if len(set(configured)) > 1:
+            raise ValueError(f"Conflicting environment aliases configured for {field_name}")
+        if configured:
+            values[field_name] = configured[0]
     return Settings.model_validate(values)
