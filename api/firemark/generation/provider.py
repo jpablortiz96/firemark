@@ -33,8 +33,23 @@ ProviderFailureCode = Literal[
 class GenerationProviderError(RuntimeError):
     """Safe provider failure that excludes raw response and credential material."""
 
-    def __init__(self, code: ProviderFailureCode) -> None:
-        super().__init__(f"Media provider failed: {code}")
+    def __init__(
+        self,
+        code: ProviderFailureCode,
+        *,
+        status_code: int | None = None,
+        safe_reason_code: str | None = None,
+    ) -> None:
+        self.status_code = status_code if status_code is not None and 100 <= status_code <= 599 else None
+        self.safe_reason_code = (
+            safe_reason_code
+            if safe_reason_code is not None
+            and safe_reason_code.replace("_", "").isalnum()
+            and len(safe_reason_code) <= 64
+            else None
+        )
+        suffix = f" (status={self.status_code})" if self.status_code is not None else ""
+        super().__init__(f"Media provider failed: {code}{suffix}")
         self.code = code
 
 

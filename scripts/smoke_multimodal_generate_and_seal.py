@@ -105,6 +105,7 @@ MediaKind = Literal["image", "audio"]
 OperationState = Literal[
     "request_ready",
     "provider_call_started",
+    "provider_rejected",
     "generated",
     "prepared",
     "custody_persisted",
@@ -169,6 +170,14 @@ _PROVIDER_CATEGORIES = {
     "response_too_large": "RESPONSE_TOO_LARGE",
 }
 
+_DEFINITIVE_RETRY_CODES = {
+    "authentication",
+    "permission_denied",
+    "quota_or_billing",
+    "invalid_request",
+    "model_or_size_unsupported",
+}
+
 _FORBIDDEN_REPORT_MARKERS = (
     "prompt",
     "tts text",
@@ -222,6 +231,9 @@ class MultimodalCheckpoint(BaseModel):
     manifest_path: str | None = None
     generated_metadata_path: str | None = None
     new_provider_calls: int = Field(default=0, ge=0, le=1)
+    prior_rejected_calls: int = Field(default=0, ge=0)
+    provider_failure_code: str | None = None
+    provider_retry_allowed: bool = False
     current_stage: str | None = None
     stage_results: tuple[dict[str, str], ...] = ()
     assets_source: CheckpointObject | None = None
@@ -320,6 +332,19 @@ class CheckpointStore:
             generated_byte_count=len(media.data),
             source_path=str(source_path),
             generated_metadata_path=str(metadata_path),
+            provider_failure_code=None,
+            provider_retry_allowed=False,
+        )
+
+    def persist_provider_failure(self, exc: GenerationProviderError) -> None:
+        checkpoint = self.read()
+        if checkpoint.operation_state != "provider_call_started":
+            raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
+        self.update(
+            operation_state="provider_rejected",
+            prior_rejected_calls=checkpoint.prior_rejected_calls + 1,
+            provider_failure_code=exc.code,
+            provider_retry_allowed=exc.code in _DEFINITIVE_RETRY_CODES,
         )
 
     def checkpoint_event(self, event: str, values: dict[str, Any]) -> None:
@@ -470,7 +495,11 @@ class CapturedGeminiProvider:
         self.calls += 1
         self.store.update(operation_state="provider_call_started", new_provider_calls=1)
         self.tracker.begin("gemini_generation")
-        media = self.provider.generate_image(request)
+        try:
+            media = self.provider.generate_image(request)
+        except GenerationProviderError as exc:
+            self.store.persist_provider_failure(exc)
+            raise
         self.store.persist_generated(media)
         self.tracker.begin("gemini_response_validation")
         return media
@@ -494,7 +523,11 @@ class CapturedElevenLabsProvider:
         self.calls += 1
         self.store.update(operation_state="provider_call_started", new_provider_calls=1)
         self.tracker.begin("elevenlabs_generation")
-        media = self.provider.generate_audio(request)
+        try:
+            media = self.provider.generate_audio(request)
+        except GenerationProviderError as exc:
+            self.store.persist_provider_failure(exc)
+            raise
         self.store.persist_generated(media)
         self.tracker.begin("elevenlabs_mp3_validation")
         return media
@@ -1176,6 +1209,20 @@ def _initialize_checkpoint(
     return checkpoint
 
 
+def _checkpoint_retry_allowed(checkpoint: MultimodalCheckpoint) -> bool:
+    """Allow only a definitive rejection with no captured generation evidence."""
+    return bool(
+        checkpoint.operation_state == "provider_rejected"
+        and checkpoint.provider_retry_allowed
+        and checkpoint.provider_failure_code in _DEFINITIVE_RETRY_CODES
+        and checkpoint.prior_rejected_calls == 1
+        and checkpoint.source_sha256 is None
+        and checkpoint.source_path is None
+        and checkpoint.manifest_path is None
+        and checkpoint.generated_metadata_path is None
+    )
+
+
 def _forbidden_openai_provider() -> NoReturn:
     raise LiveCheckpointError("CONFIGURATION_ERROR")
 
@@ -1325,6 +1372,16 @@ def _run_operation(
         or checkpoint.signer_key_id != signer.signer_key_id
     ):
         raise LiveCheckpointError("CONFIGURATION_ERROR")
+    if checkpoint.operation_state == "provider_rejected":
+        if not _checkpoint_retry_allowed(checkpoint):
+            raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
+        checkpoint = store.update(
+            operation_state="request_ready",
+            new_provider_calls=0,
+            provider_failure_code=None,
+            provider_retry_allowed=False,
+            current_stage=None,
+        )
     if checkpoint.operation_state == "request_ready" and checkpoint.new_provider_calls != 0:
         raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
     if checkpoint.operation_state == "provider_call_started":

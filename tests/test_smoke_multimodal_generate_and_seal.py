@@ -196,8 +196,11 @@ def test_failed_provider_call_is_marked_ambiguous_and_never_retried(tmp_path: Pa
     with pytest.raises(GenerationProviderError, match="timeout"):
         captured.generate_image(object())  # type: ignore[arg-type]
     checkpoint = store.read()
-    assert checkpoint.operation_state == "provider_call_started"
+    assert checkpoint.operation_state == "provider_rejected"
     assert checkpoint.new_provider_calls == 1
+    assert checkpoint.provider_failure_code == "timeout"
+    assert checkpoint.provider_retry_allowed is False
+    assert not smoke._checkpoint_retry_allowed(checkpoint)
 
 
 @pytest.mark.parametrize("media_type", ["image", "audio"])

@@ -6,6 +6,7 @@ import base64
 import binascii
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,15 +17,16 @@ from api.firemark.generation.provider import GenerationProviderError, ProviderFa
 
 HTTPClientFactory = Callable[[], httpx.Client]
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_SIZE_ASPECT_RATIO = {
-    "256x256": "1:1",
-    "512x512": "1:1",
-    "1024x1024": "1:1",
-    "1536x1024": "3:2",
-    "1024x1536": "2:3",
-    "1792x1024": "16:9",
-    "1024x1792": "9:16",
-}
+_PREFLIGHT_RESPONSE_LIMIT = 128 * 1024
+
+
+@dataclass(frozen=True)
+class GeminiModelAccess:
+    """Safe model-access result without raw provider fields."""
+
+    model: str
+    available: bool
+    supports_generate_content: bool | None
 
 
 class GeminiImageProvider:
@@ -58,50 +60,170 @@ class GeminiImageProvider:
         )
 
     @staticmethod
-    def _failure_code(status: int) -> ProviderFailureCode:
+    def _safe_error_details(response: httpx.Response) -> tuple[str | None, str]:
+        reason: str | None = None
+        message = ""
+        try:
+            payload = response.json()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                raw_reason = error.get("status")
+                if (
+                    isinstance(raw_reason, str)
+                    and raw_reason.replace("_", "").isalnum()
+                    and len(raw_reason) <= 64
+                ):
+                    reason = raw_reason.upper()
+                raw_message = error.get("message")
+                if isinstance(raw_message, str):
+                    message = raw_message.lower()
+        except (ValueError, TypeError):
+            pass
+        return reason, message
+
+    @classmethod
+    def _failure_code(cls, response: httpx.Response) -> ProviderFailureCode:
+        status = response.status_code
+        reason, message = cls._safe_error_details(response)
         if status == 401:
             return "authentication"
         if status == 403:
+            if reason == "RESOURCE_EXHAUSTED" or any(
+                token in message for token in ("quota", "billing")
+            ):
+                return "quota_or_billing"
             return "permission_denied"
         if status == 429:
+            if reason == "RESOURCE_EXHAUSTED" and any(
+                token in message for token in ("quota", "billing")
+            ):
+                return "quota_or_billing"
             return "rate_limit"
         if status == 402:
             return "quota_or_billing"
-        if status in {400, 404, 422}:
-            return "model_or_size_unsupported" if status == 404 else "invalid_request"
+        if status == 404:
+            return "model_or_size_unsupported"
+        if status in {400, 422}:
+            if any(token in message for token in ("safety", "blocked", "prohibited")):
+                return "safety_rejection"
+            if "model" in message:
+                return "model_or_size_unsupported"
+            return "invalid_request"
         if status in {408, 504}:
             return "timeout"
         return "unavailable"
 
+    @classmethod
+    def _provider_error(cls, response: httpx.Response) -> GenerationProviderError:
+        reason, _ = cls._safe_error_details(response)
+        return GenerationProviderError(
+            cls._failure_code(response),
+            status_code=response.status_code,
+            safe_reason_code=reason or f"HTTP_{response.status_code}",
+        )
+
     @staticmethod
     def build_request_parameters(request: GenerationRequest) -> dict[str, Any]:
-        generation_config: dict[str, Any] = {"responseModalities": ["IMAGE"]}
-        aspect_ratio = _SIZE_ASPECT_RATIO.get(request.size)
-        if aspect_ratio is not None:
-            generation_config["responseFormat"] = {
-                "image": {"aspectRatio": aspect_ratio, "imageSize": "1K"}
-            }
         return {
             "contents": [{"parts": [{"text": request.prompt}]}],
-            "generationConfig": generation_config,
+            "generationConfig": {"responseModalities": ["IMAGE"]},
         }
 
-    def _request(self, request: GenerationRequest) -> httpx.Response:
+    @staticmethod
+    def _buffer_response(response: httpx.Response, *, max_bytes: int) -> httpx.Response:
+        declared = response.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > max_bytes:
+                    raise GenerationProviderError("response_too_large")
+            except ValueError:
+                raise GenerationProviderError("malformed_response") from None
+        payload = bytearray()
+        for chunk in response.iter_bytes():
+            payload.extend(chunk)
+            if len(payload) > max_bytes:
+                raise GenerationProviderError("response_too_large")
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            content=bytes(payload),
+            request=response.request,
+        )
+
+    def preflight_model(self, model: str) -> GeminiModelAccess:
+        """Read model metadata without performing generation."""
         try:
             with self._client() as client:
-                response = client.post(
-                    f"/v1/models/{request.model}:generateContent",
+                with client.stream(
+                    "GET",
+                    f"/v1beta/models/{model}",
                     headers={"x-goog-api-key": self._api_key},
-                    json=self.build_request_parameters(request),
-                )
+                ) as raw_response:
+                    response = self._buffer_response(
+                        raw_response, max_bytes=_PREFLIGHT_RESPONSE_LIMIT
+                    )
+        except GenerationProviderError:
+            raise
         except httpx.TimeoutException:
             raise GenerationProviderError("timeout") from None
         except httpx.HTTPError:
             raise GenerationProviderError("unavailable") from None
         if 300 <= response.status_code < 400:
-            raise GenerationProviderError("malformed_response")
+            raise GenerationProviderError(
+                "malformed_response", status_code=response.status_code
+            )
         if not response.is_success:
-            raise GenerationProviderError(self._failure_code(response.status_code))
+            raise self._provider_error(response)
+        try:
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise TypeError
+            returned_name = payload.get("name")
+            if returned_name not in {model, f"models/{model}"}:
+                raise ValueError
+            methods = payload.get("supportedGenerationMethods")
+            if methods is not None and (
+                not isinstance(methods, list)
+                or not all(isinstance(item, str) for item in methods)
+            ):
+                raise TypeError
+            supports = "generateContent" in methods if isinstance(methods, list) else None
+        except (TypeError, ValueError):
+            raise GenerationProviderError("malformed_response") from None
+        return GeminiModelAccess(
+            model=model,
+            available=True,
+            supports_generate_content=supports,
+        )
+
+    def _request(self, request: GenerationRequest) -> httpx.Response:
+        try:
+            with self._client() as client:
+                with client.stream(
+                    "POST",
+                    f"/v1/models/{request.model}:generateContent",
+                    headers={
+                        "Content-Type": "application/json",
+                        "x-goog-api-key": self._api_key,
+                    },
+                    json=self.build_request_parameters(request),
+                ) as raw_response:
+                    response = self._buffer_response(
+                        raw_response,
+                        max_bytes=self._max_image_bytes * 2 + _PREFLIGHT_RESPONSE_LIMIT,
+                    )
+        except GenerationProviderError:
+            raise
+        except httpx.TimeoutException:
+            raise GenerationProviderError("timeout") from None
+        except httpx.HTTPError:
+            raise GenerationProviderError("unavailable") from None
+        if 300 <= response.status_code < 400:
+            raise GenerationProviderError(
+                "malformed_response", status_code=response.status_code
+            )
+        if not response.is_success:
+            raise self._provider_error(response)
         return response
 
     def validate_response(self, response: httpx.Response, request: GenerationRequest) -> GeneratedImage:
@@ -115,30 +237,33 @@ class GeminiImageProvider:
         try:
             payload = response.json()
             candidates = payload.get("candidates")
-            if not isinstance(candidates, list) or len(candidates) != 1:
+            if not isinstance(candidates, list) or not candidates:
                 raise GenerationProviderError("malformed_response")
-            candidate = candidates[0]
-            if not isinstance(candidate, dict):
-                raise GenerationProviderError("malformed_response")
-            content = candidate.get("content")
-            parts = content.get("parts") if isinstance(content, dict) else None
-            if not isinstance(parts, list):
-                raise GenerationProviderError("malformed_response")
-            images = [
-                part.get("inlineData", part.get("inline_data"))
-                for part in parts
-                if isinstance(part, dict)
-                and isinstance(part.get("inlineData", part.get("inline_data")), dict)
-            ]
+            images: list[dict[str, Any]] = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    raise GenerationProviderError("malformed_response")
+                content = candidate.get("content")
+                parts = content.get("parts") if isinstance(content, dict) else None
+                if not isinstance(parts, list):
+                    raise GenerationProviderError("malformed_response")
+                images.extend(
+                    image
+                    for part in parts
+                    if isinstance(part, dict)
+                    and isinstance(
+                        image := part.get("inlineData", part.get("inline_data")), dict
+                    )
+                )
             if len(images) != 1:
                 raise GenerationProviderError("malformed_response")
             image = images[0]
-            if not isinstance(image, dict):
-                raise GenerationProviderError("malformed_response")
             mime_type = image.get("mimeType", image.get("mime_type"))
             encoded = image.get("data")
-            if mime_type != "image/png" or not isinstance(encoded, str):
+            if mime_type != "image/png":
                 raise GenerationProviderError("non_png_response")
+            if not isinstance(encoded, str) or not encoded:
+                raise GenerationProviderError("malformed_response")
             data = base64.b64decode(encoded, validate=True)
         except GenerationProviderError:
             raise

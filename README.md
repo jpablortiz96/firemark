@@ -157,6 +157,16 @@ endpoints. Gemini accepts exactly one inline PNG. ElevenLabs requests `mp3_44100
 only bounded `audio/mpeg` bytes. Their errors use the same safe normalized categories; credentials,
 prompts/text, response bodies, and URLs are excluded from logs and public records.
 
+Gemini generation uses the `v1` `generateContent` endpoint with only `contents` and camelCase
+`generationConfig.responseModalities`. Model access can be checked independently through the
+read-only `v1beta/models/{model}` preflight. The isolated smoke performs that preflight and exactly
+one generation request only when `--live` is explicitly supplied:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_gemini_image_provider.py
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_gemini_image_provider.py --live
+```
+
 Generation and delivery use distinct `SecretStr` bearer credentials and constant-time comparison.
 Missing or invalid bearer credentials return 401; public health, Birth Certificate, and Verify
 routes remain anonymous. The prompt is sent only to the selected provider and retained only in the
