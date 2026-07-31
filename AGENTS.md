@@ -55,11 +55,37 @@ Generation uses the official **Interactions API**:
 POST https://generativelanguage.googleapis.com/v1beta/interactions
 {"model": "<GEMINI_IMAGE_MODEL>",
  "input": [{"type": "text", "text": "<prompt>"}],
- "response_format": {"type": "image", "mime_type": "image/png"}}
+ "response_format": {"type": "image", "mime_type": "image/png",
+                     "aspect_ratio": "1:1", "image_size": "1K",
+                     "delivery": "uri"},
+ "stream": false, "background": false, "store": false}
 ```
 
-The image is read from `output_image`, or from an `image` content block inside `steps`. Exactly one
-image is accepted. Never send `Authorization: Bearer`. Never prefix the model with `models/`.
+Keys are snake_case; this is the Interactions REST schema, not `generateContent`. Never send
+`Authorization: Bearer`. Never prefix the model with `models/`. Never add undocumented fields.
+
+### URI delivery
+
+`delivery: "uri"` is mandatory, not an optimization. A large inline Base64 image pushes a
+multi-megabyte body through the connection carrying the interaction metadata; a failure while
+receiving it is indistinguishable from an unfinished generation and makes the whole operation
+ambiguous. URI delivery splits this into two independently bounded operations:
+
+1. A non-streamed `POST` reads the small metadata: `status` must be `completed` with exactly one
+   final image reference (`output_image.uri`, or an `image` block inside `steps`). Inline Base64
+   stays as a defensive parser path only.
+2. A separate client downloads the bytes with bounded connect/read/write/pool timeouts, a byte
+   ceiling, an enforced content type, PNG magic-byte validation, and an immediate SHA-256.
+
+**The provider URI is transient private provider data.** Never print, log, persist, checkpoint,
+report, expose through an exception, return in public certificate data, or write it to Supabase or
+B2 metadata. Before downloading, require HTTPS, no URL credentials, no fragment, bounded length,
+and a Google-hosted allowlisted host; reject localhost, loopback, private, link-local, reserved and
+multicast addresses. Reject redirects by default; follow at most one, and only after revalidating
+the destination. Present the API key only to `generativelanguage.googleapis.com`.
+
+A JPEG or WebP response is reported as `NON_PNG_RESPONSE`. Never relabel bytes; add no implicit
+lossy conversion.
 
 Certificate identity for the current image model must be exactly:
 
@@ -90,9 +116,16 @@ MODEL_UNSUPPORTED       INVALID_REQUEST    TIMEOUT                   PROVIDER_UN
 MALFORMED_RESPONSE      NON_PNG_RESPONSE   RESPONSE_TOO_LARGE        SAFE_UNEXPECTED_FAILURE
 ```
 
-Transport failures additionally carry a safe reason code so a DNS problem is never mistaken for an
-HTTP 5xx: `DNS_RESOLUTION_FAILURE`, `TRANSPORT_CONNECT_FAILURE`, `TRANSPORT_PROXY_FAILURE`,
-`TRANSPORT_TIMEOUT`, `TRANSPORT_FAILURE`.
+Every relevant `httpx` failure class carries its own safe reason code so a DNS problem, a read
+timeout, a truncated body and an HTTP 5xx are never confused: `TRANSPORT_CONNECT_TIMEOUT`,
+`TRANSPORT_READ_TIMEOUT`, `TRANSPORT_WRITE_TIMEOUT`, `TRANSPORT_POOL_TIMEOUT`,
+`TRANSPORT_PROXY_FAILURE`, `DNS_RESOLUTION_FAILURE`, `TRANSPORT_CONNECT_FAILURE`,
+`TRANSPORT_READ_FAILURE`, `TRANSPORT_WRITE_FAILURE`, `TRANSPORT_REMOTE_PROTOCOL_FAILURE`,
+`TRANSPORT_LOCAL_PROTOCOL_FAILURE`, `TRANSPORT_DECODING_FAILURE`, `TRANSPORT_FAILURE`.
+
+Persist only the normalized code, the HTTP status when available, the safe reason code, and the
+exception class name from `SAFE_EXCEPTION_TOKENS`. Never persist an exception message, `repr`,
+request, response, headers, prompt, API key or URI.
 
 ## Security rules
 
@@ -128,6 +161,14 @@ Live commands cost money and touch irreversible storage. Rules:
   closed**. Never auto-resubmit and never silently switch provider or model.
 - A definitive rejection with no captured bytes may be retried only with explicit operator
   authorization (`--allow-definitive-retry`).
+
+**Retrying an operation is not the same as starting a new one.** An ambiguous checkpoint is
+preserved verbatim: never edited, never marked retryable, never discarded, and never rewritten —
+not even its stage rows. `--allow-definitive-retry` must not unblock it. An operator may instead
+pass `--start-new-operation-after-ambiguous` (which requires `--live`) to atomically archive the
+record to `.artifacts/gemini-image-provider-checkpoints/gemini-image-provider-ambiguous-<UTC>.json`,
+mint a new operation ID, and authorize exactly one new submission. That is a new billable
+generation, and the CLI says so before it runs. A second ambiguous result fails closed again.
 - ElevenLabs starts only after the Gemini image flow completes.
 
 Safe checkpoints live under the ignored `.artifacts/` tree; private bytes go in a separate

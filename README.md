@@ -166,16 +166,48 @@ is the official Interactions API:
 POST https://generativelanguage.googleapis.com/v1beta/interactions
 x-goog-api-key: <GEMINI_API_KEY>
 Content-Type: application/json
+Accept: application/json
 
 {"model": "gemini-3.1-flash-image",
  "input": [{"type": "text", "text": "<prompt>"}],
- "response_format": {"type": "image", "mime_type": "image/png"}}
+ "response_format": {"type": "image", "mime_type": "image/png",
+                     "aspect_ratio": "1:1", "image_size": "1K",
+                     "delivery": "uri"},
+ "stream": false, "background": false, "store": false}
 ```
 
-The generated image is read from the documented `output_image` block, or from an `image` content
-block inside `steps` when `output_image` is absent. Exactly one image is accepted. The API key
-travels only in `x-goog-api-key`; no `Authorization: Bearer` header is ever sent, the model field
-never carries a duplicate `models/` prefix, and GMI Cloud is never contacted.
+The request is unary and synchronous: `stream`, `background` and `store` are all explicitly false.
+The API key travels only in `x-goog-api-key`; no `Authorization: Bearer` header is ever sent, the
+model field never carries a duplicate `models/` prefix, and GMI Cloud is never contacted.
+
+#### Why URI delivery
+
+`delivery: "uri"` keeps the interaction response small. A large inline Base64 image forces a
+multi-megabyte body through the same connection that carries the interaction metadata; a failure
+while receiving or decoding it cannot be distinguished from an unfinished generation, which makes
+the whole operation ambiguous and unrecoverable without a new billable request.
+
+With URI delivery the flow splits into two independently bounded operations:
+
+1. A normal non-streamed `POST` reads the small interaction metadata and requires
+   `status: completed` with exactly one final image reference — read from `output_image.uri`, or
+   from an `image` content block inside `steps`. Inline Base64 remains a defensive parser path but
+   is not the requested delivery mode.
+2. A separate client downloads the bytes with bounded connect, read, write and pool timeouts, a
+   hard byte ceiling, an enforced content type, PNG magic-byte validation, and an immediate
+   SHA-256.
+
+The provider URI is transient private provider data. It is never printed, logged, persisted,
+checkpointed, reported, attached to an exception, returned in public certificate data, or written
+to Supabase or B2 metadata. Before any download FIREMARK requires HTTPS, no credentials in the URL,
+no fragment, a bounded length, and a Google-hosted allowlisted host; it rejects `localhost`,
+loopback, private, link-local, reserved and multicast addresses. Redirects are rejected by default;
+at most one is followed and only after the destination passes the same validation. The API key is
+presented only to `generativelanguage.googleapis.com` — a signed Google storage or user-content URL
+carries its own authorization and receives no credential.
+
+If the provider returns JPEG or WebP despite the PNG request, FIREMARK reports `NON_PNG_RESPONSE`.
+It never relabels the bytes and adds no implicit lossy conversion.
 
 The certificate identity is exact:
 
@@ -204,9 +236,27 @@ configured model, whether that model appears in the listing, and bounded support
 It never prints the API key, a prompt, a raw response, a provider message, an authorization header,
 a request identifier, quota metadata, or account metadata.
 
-Transport problems are no longer collapsed into a single category. `DNS_RESOLUTION_FAILURE`,
-`TRANSPORT_CONNECT_FAILURE`, `TRANSPORT_PROXY_FAILURE`, `TRANSPORT_TIMEOUT`, and `TRANSPORT_FAILURE`
-are distinct safe reason codes, and an HTTP 5xx carries its real status instead.
+Transport problems are never collapsed into a single category. Each relevant `httpx` failure class
+carries its own safe reason code, and an HTTP 5xx carries its real status instead:
+
+| Failure class | Normalized code | Safe reason code |
+| --- | --- | --- |
+| `ConnectTimeout` | `timeout` | `TRANSPORT_CONNECT_TIMEOUT` |
+| `ReadTimeout` | `timeout` | `TRANSPORT_READ_TIMEOUT` |
+| `WriteTimeout` | `timeout` | `TRANSPORT_WRITE_TIMEOUT` |
+| `PoolTimeout` | `timeout` | `TRANSPORT_POOL_TIMEOUT` |
+| `ProxyError` | `unavailable` | `TRANSPORT_PROXY_FAILURE` |
+| `ConnectError` | `unavailable` | `DNS_RESOLUTION_FAILURE` or `TRANSPORT_CONNECT_FAILURE` |
+| `ReadError` | `unavailable` | `TRANSPORT_READ_FAILURE` |
+| `WriteError` | `unavailable` | `TRANSPORT_WRITE_FAILURE` |
+| `RemoteProtocolError` | `unavailable` | `TRANSPORT_REMOTE_PROTOCOL_FAILURE` |
+| `LocalProtocolError` | `unavailable` | `TRANSPORT_LOCAL_PROTOCOL_FAILURE` |
+| `DecodingError` | `unavailable` | `TRANSPORT_DECODING_FAILURE` |
+| any other `TransportError` | `unavailable` | `TRANSPORT_FAILURE` |
+
+Only the normalized code, HTTP status when available, safe reason code, and the exception class
+name from a strict allowlist are persisted. Exception messages, `repr`, requests, responses,
+headers, prompts, API keys and URIs are never stored.
 
 The isolated smoke submits at most one generation request only when `--live` is explicitly supplied:
 
@@ -218,11 +268,36 @@ D:\firemark\.venv\Scripts\python.exe scripts\smoke_gemini_image_provider.py --li
 It writes `.artifacts/gemini-image-provider-checkpoint.json` atomically before submission, after a
 definitive provider rejection, and immediately after valid PNG bytes are received. Generated bytes
 are stored under the ignored `.artifacts/gemini-image-provider-private/` tree. Once bytes exist,
-recovery reuses them and Gemini is never called again. An ambiguous outcome — a timeout, a lost
-connection after submission, or an uncaptured result — fails closed with
-`AMBIGUOUS_PRIOR_SUBMISSION` and never resubmits. Only a definitive rejection that produced no
-bytes may be retried, and only when the operator explicitly passes
-`--allow-definitive-retry`.
+recovery reuses them and Gemini is never called again. The stage table reports twelve safe stages,
+from `configuration_validation` through `interaction_submission`, `image_uri_validation`,
+`image_download` and `checkpoint_completion`.
+
+#### Retrying an operation versus starting a new one
+
+These are different decisions and FIREMARK keeps them separate.
+
+| Situation | Meaning | Command |
+| --- | --- | --- |
+| Definitive rejection, no bytes | The provider refused the request. Nothing was produced. | `--allow-definitive-retry` |
+| Ambiguous outcome | A timeout, a lost connection after submission, or an uncaptured result. Generation may or may not have happened and may already be billed. | blocked; requires `--start-new-operation-after-ambiguous` |
+
+An ambiguous checkpoint fails closed with `AMBIGUOUS_PRIOR_SUBMISSION` and is **never** retried and
+never rewritten — the run does not even update its stage rows. `--allow-definitive-retry` cannot
+unblock it.
+
+To move forward, an operator explicitly starts a *new* operation. This is a new billable
+generation, not a retry:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_gemini_image_provider.py --live `
+  --start-new-operation-after-ambiguous
+```
+
+The option requires `--live`. It atomically moves the preserved record, byte for byte, to
+`.artifacts/gemini-image-provider-checkpoints/gemini-image-provider-ambiguous-<UTC>.json`, mints a
+new operation ID, and allows exactly one new submission. The archive is never edited, never marked
+retryable, and never discarded; it stays inside the ignored `.artifacts/` tree. If the new operation
+is also ambiguous, it fails closed again and needs fresh authorization.
 
 Generation and delivery use distinct `SecretStr` bearer credentials and constant-time comparison.
 Missing or invalid bearer credentials return 401; public health, Birth Certificate, and Verify

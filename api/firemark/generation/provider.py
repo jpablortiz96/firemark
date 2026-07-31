@@ -30,6 +30,30 @@ ProviderFailureCode = Literal[
 ]
 
 
+#: Exception class names that may be persisted as a safe diagnostic token. Only
+#: the class name is ever retained; messages, repr, requests and responses are not.
+SAFE_EXCEPTION_TOKENS = frozenset(
+    {
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "TimeoutException",
+        "ProxyError",
+        "ConnectError",
+        "ReadError",
+        "WriteError",
+        "CloseError",
+        "RemoteProtocolError",
+        "LocalProtocolError",
+        "DecodingError",
+        "UnsupportedProtocol",
+        "TransportError",
+        "HTTPError",
+    }
+)
+
+
 class GenerationProviderError(RuntimeError):
     """Safe provider failure that excludes raw response and credential material."""
 
@@ -39,6 +63,7 @@ class GenerationProviderError(RuntimeError):
         *,
         status_code: int | None = None,
         safe_reason_code: str | None = None,
+        safe_exception_token: str | None = None,
     ) -> None:
         self.status_code = status_code if status_code is not None and 100 <= status_code <= 599 else None
         self.safe_reason_code = (
@@ -47,6 +72,9 @@ class GenerationProviderError(RuntimeError):
             and safe_reason_code.replace("_", "").isalnum()
             and len(safe_reason_code) <= 64
             else None
+        )
+        self.safe_exception_token = (
+            safe_exception_token if safe_exception_token in SAFE_EXCEPTION_TOKENS else None
         )
         suffix = f" (status={self.status_code})" if self.status_code is not None else ""
         super().__init__(f"Media provider failed: {code}{suffix}")
