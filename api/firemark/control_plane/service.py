@@ -29,6 +29,7 @@ from api.firemark.control_plane.repository import (
     DeliveryStorageError,
     RegistrationValidationError,
 )
+from api.firemark.generation.provider_identity import provider_model_display_name
 from api.firemark.public_capsule import (
     FiremarkPublicAudioReferenceV1,
     FiremarkPublicCapsuleV1,
@@ -112,6 +113,9 @@ class CertificateService:
                 "run_id": certificate.run_id,
                 "provider": certificate.provider,
                 "model": certificate.model,
+                "provider_model_name": provider_model_display_name(
+                    certificate.provider, certificate.model
+                ),
                 "media_type": certificate.media_type,
                 "mime_type": certificate.mime_type,
                 "byte_size": certificate.byte_size,

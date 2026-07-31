@@ -23,7 +23,7 @@ NOW = datetime(2026, 7, 30, 20, tzinfo=UTC)
 
 
 def make_store(tmp_path: Path, media_type: smoke.MediaKind) -> smoke.CheckpointStore:
-    provider = "gemini" if media_type == "image" else "elevenlabs"
+    provider = "google_gemini" if media_type == "image" else "elevenlabs"
     store = smoke.CheckpointStore(
         tmp_path / f"{provider}-checkpoint.json", tmp_path / "private" / provider
     )
@@ -42,7 +42,7 @@ def make_store(tmp_path: Path, media_type: smoke.MediaKind) -> smoke.CheckpointS
 def generated_image() -> GeneratedImage:
     return GeneratedImage(
         data=_TINY_PNG,
-        provider="gemini",
+        provider="google_gemini",
         model="safe-model",
         provider_request_id="safe-request",
         provider_created_at=NOW,
@@ -129,7 +129,7 @@ def test_help_is_available_without_live_configuration() -> None:
 def test_image_checkpoint_is_atomic_and_safe(tmp_path: Path) -> None:
     store = make_store(tmp_path, "image")
     payload = store.path.read_text("utf-8")
-    assert json.loads(payload)["provider"] == "gemini"
+    assert json.loads(payload)["provider"] == "google_gemini"
     assert smoke.GEMINI_PROMPT not in payload
     assert "api_key" not in payload.lower()
 
@@ -374,7 +374,7 @@ def test_safe_report_is_atomic_and_contains_no_private_input(tmp_path: Path) -> 
     smoke._write_safe_report(
         path,
         {
-            "provider": "gemini",
+            "provider": "google_gemini",
             "model": "safe-model",
             "new_gemini_calls": 1,
         },
@@ -384,7 +384,7 @@ def test_safe_report_is_atomic_and_contains_no_private_input(tmp_path: Path) -> 
     assert smoke.GEMINI_PROMPT not in payload
     assert smoke.ELEVENLABS_TEXT not in payload
     with pytest.raises(smoke.LiveCheckpointError):
-        smoke._write_safe_report(path, {"provider": "gemini"}, force=False)
+        smoke._write_safe_report(path, {"provider": "google_gemini"}, force=False)
 
 
 @pytest.mark.parametrize(

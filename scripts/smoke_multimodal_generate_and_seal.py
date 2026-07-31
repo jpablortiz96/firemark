@@ -72,6 +72,7 @@ from api.firemark.generation.models import (
     GenerationRequest,
 )
 from api.firemark.generation.provider import GenerationProviderError
+from api.firemark.generation.provider_identity import GOOGLE_GEMINI_PROVIDER
 from api.firemark.hashing import sha256_bytes
 from api.firemark.public_capsule import (
     FiremarkPublicAudioReferenceV1,
@@ -102,6 +103,14 @@ ELEVENLABS_TEXT = (
 )
 
 MediaKind = Literal["image", "audio"]
+
+#: Stage names stay provider-neutral labels; the stored identity remains accurate.
+STAGE_PREFIXES = {GOOGLE_GEMINI_PROVIDER: "gemini", "elevenlabs": "elevenlabs"}
+
+
+def _stage_prefix(provider: str) -> str:
+    return STAGE_PREFIXES.get(provider, provider)
+
 OperationState = Literal[
     "request_ready",
     "provider_call_started",
@@ -213,7 +222,7 @@ class MultimodalCheckpoint(BaseModel):
     media_type: MediaKind
     mime_type: Literal["image/png", "audio/mpeg"]
     file_extension: Literal["png", "mp3"]
-    provider: Literal["gemini", "elevenlabs"]
+    provider: Literal["google_gemini", "elevenlabs"]
     model: str
     size: str | None = None
     idempotency_key: str
@@ -683,7 +692,7 @@ def _load_or_create_custody(
         checkpoint.vault_source,
         checkpoint.vault_manifest,
     )
-    tracker.begin(f"{checkpoint.provider}_b2_custody")
+    tracker.begin(f"{_stage_prefix(checkpoint.provider)}_b2_custody")
     if all(reference is not None for reference in refs):
         assets_source_ref = checkpoint.assets_source
         assets_manifest_ref = checkpoint.assets_manifest
@@ -871,7 +880,7 @@ def _register_recovered(
     )
     if signer.signer_key_id != checkpoint.signer_key_id:
         raise LiveCheckpointError("CONFIGURATION_ERROR")
-    tracker.begin(f"{checkpoint.provider}_envelope_signature")
+    tracker.begin(f"{_stage_prefix(checkpoint.provider)}_envelope_signature")
     envelope = SealEnvelopeV1(
         cert_id=checkpoint.cert_id,
         run_id=checkpoint.run_id,
@@ -960,7 +969,7 @@ def _register_recovered(
     )
     service = CertificateService(repository, public_base_url=config.public_base_url)
     existing = repository.get_certificate(checkpoint.cert_id)
-    tracker.begin(f"{checkpoint.provider}_supabase_registration")
+    tracker.begin(f"{_stage_prefix(checkpoint.provider)}_supabase_registration")
     if existing is None:
         service.register_certificate(
             generation_run=generation_run,
@@ -1060,13 +1069,13 @@ def _verify_and_deliver(
         storage=B2DeliveryStorage(assets_client),
         delivery_ttl_seconds=delivery_ttl_seconds,
     )
-    tracker.begin(f"{checkpoint.provider}_public_certificate")
+    tracker.begin(f"{_stage_prefix(checkpoint.provider)}_public_certificate")
     certificate = service.get_public_certificate(checkpoint.cert_id)
     if certificate is None or not _certificate_matches(
         repository.get_certificate(checkpoint.cert_id), checkpoint
     ):
         raise LiveCheckpointError("VERIFICATION_FAILURE")
-    tracker.begin(f"{checkpoint.provider}_verify_gate")
+    tracker.begin(f"{_stage_prefix(checkpoint.provider)}_verify_gate")
     verification = service.verify(
         VerificationRequest(
             cert_id=checkpoint.cert_id, presented_sha256=checkpoint.sealed_sha256
@@ -1074,7 +1083,7 @@ def _verify_and_deliver(
     )
     if not verification.verified or verification.media_type != checkpoint.media_type:
         raise LiveCheckpointError("VERIFICATION_FAILURE")
-    tracker.begin(f"{checkpoint.provider}_delivery")
+    tracker.begin(f"{_stage_prefix(checkpoint.provider)}_delivery")
     delivery = service.authorize_delivery(
         checkpoint.cert_id,
         DeliveryAuthorization(presented_sha256=checkpoint.sealed_sha256),
@@ -1094,7 +1103,7 @@ def _verify_and_deliver(
         )
     finally:
         transient_url = ""
-    tracker.begin(f"{checkpoint.provider}_delivered_integrity")
+    tracker.begin(f"{_stage_prefix(checkpoint.provider)}_delivered_integrity")
     if delivered != sealed or sha256_bytes(delivered) != checkpoint.sealed_sha256:
         raise LiveCheckpointError("DELIVERY_FAILURE")
     if checkpoint.media_type == "image":
@@ -1180,7 +1189,7 @@ def _initialize_checkpoint(
     store: CheckpointStore,
     *,
     media_type: MediaKind,
-    provider: Literal["gemini", "elevenlabs"],
+    provider: Literal["google_gemini", "elevenlabs"],
     model: str,
     size: str | None,
     signer: Ed25519Signer,
@@ -1264,7 +1273,7 @@ def _build_service_and_generate(
             else None
         )
     elif checkpoint.operation_state == "request_ready":
-        if checkpoint.provider == "gemini":
+        if checkpoint.provider == GOOGLE_GEMINI_PROVIDER:
             if config.gemini_api_key is None:
                 raise LiveCheckpointError("CONFIGURATION_ERROR")
             captured_gemini = CapturedGeminiProvider(
@@ -1318,7 +1327,7 @@ def _build_service_and_generate(
     request = (
         GenerateAndSealRequest(
             media_type="image",
-            provider="gemini",
+            provider=GOOGLE_GEMINI_PROVIDER,
             prompt=GEMINI_PROMPT,
             model=config.gemini_image_model,
             size=config.openai_image_size,
@@ -1343,12 +1352,13 @@ def _run_operation(
     media_type: MediaKind,
     store: CheckpointStore,
 ) -> dict[str, object]:
-    provider: Literal["gemini", "elevenlabs"] = (
-        "gemini" if media_type == "image" else "elevenlabs"
+    provider: Literal["google_gemini", "elevenlabs"] = (
+        GOOGLE_GEMINI_PROVIDER if media_type == "image" else "elevenlabs"
     )
     model = config.gemini_image_model if media_type == "image" else config.elevenlabs_model_id
-    tracker = StageTracker(store, provider)
-    tracker.begin(f"{provider}_configuration_validation")
+    stage_prefix = _stage_prefix(provider)
+    tracker = StageTracker(store, stage_prefix)
+    tracker.begin(f"{stage_prefix}_configuration_validation")
     signer = Ed25519Signer.from_private_key_base64(
         config.signing_private_key_b64.get_secret_value(), config.signing_public_key_b64
     )
@@ -1390,7 +1400,7 @@ def _run_operation(
     assets_holder: dict[str, Any] = {}
     vault_holder: dict[str, Any] = {}
     if checkpoint.operation_state in {"request_ready", "generated"}:
-        tracker.begin(f"{provider}_request_construction")
+        tracker.begin(f"{stage_prefix}_request_construction")
         _build_service_and_generate(
             settings,
             config,

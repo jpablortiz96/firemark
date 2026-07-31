@@ -1,10 +1,24 @@
-"""Bounded Gemini REST adapter for native PNG generation."""
+"""Bounded Google Gemini adapter for the official Interactions API.
+
+FIREMARK calls the Google Gemini API directly with a Google AI Studio key. The
+generation contract is the documented Interactions API:
+
+    POST https://generativelanguage.googleapis.com/v1beta/interactions
+    x-goog-api-key: <GEMINI_API_KEY>
+    {"model": "<model>", "input": [{"type": "text", "text": "<prompt>"}]}
+
+The generated image is returned as ``output_image`` (or an ``image`` content
+block inside ``steps``) carrying base64 ``data`` and ``mime_type``. FIREMARK
+never contacts GMI Cloud, never sends an ``Authorization`` bearer header, and
+never logs or persists a raw provider response.
+"""
 
 from __future__ import annotations
 
 import base64
 import binascii
 import re
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,23 +28,39 @@ import httpx
 
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
 from api.firemark.generation.provider import GenerationProviderError, ProviderFailureCode
+from api.firemark.generation.provider_identity import (
+    GOOGLE_GEMINI_PROVIDER,
+    provider_model_display_name,
+)
 
 HTTPClientFactory = Callable[[], httpx.Client]
+
+GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com"
+GEMINI_API_VERSION = "v1beta"
+GEMINI_INTERACTIONS_PATH = f"/{GEMINI_API_VERSION}/interactions"
+GEMINI_MODELS_PATH = f"/{GEMINI_API_VERSION}/models"
+GEMINI_OUTPUT_MIME_TYPE = "image/png"
+
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_PREFLIGHT_RESPONSE_LIMIT = 128 * 1024
+_SAFE_METHOD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}$")
+_METADATA_RESPONSE_LIMIT = 512 * 1024
+_MODEL_RESOURCE_PREFIX = "models/"
+_COMPLETED_STATUS = "completed"
+_BUDGET_STATUS = "budget_exceeded"
 
 
 @dataclass(frozen=True)
 class GeminiModelAccess:
-    """Safe model-access result without raw provider fields."""
+    """Safe read-only model metadata result without raw provider fields."""
 
     model: str
     available: bool
-    supports_generate_content: bool | None
+    supported_methods: tuple[str, ...] | None = None
+    listed: bool | None = None
 
 
 class GeminiImageProvider:
-    """Generate exactly one PNG through Google's documented generateContent endpoint."""
+    """Generate exactly one PNG through Google's documented Interactions API."""
 
     def __init__(
         self,
@@ -54,10 +84,17 @@ class GeminiImageProvider:
         if self._client_factory is not None:
             return self._client_factory()
         return httpx.Client(
-            base_url="https://generativelanguage.googleapis.com",
+            base_url=GEMINI_API_BASE_URL,
             follow_redirects=False,
             timeout=float(self._timeout_seconds),
         )
+
+    def _headers(self, *, json_body: bool) -> dict[str, str]:
+        """Authenticate a Google AI Studio key only through ``x-goog-api-key``."""
+        headers = {"x-goog-api-key": self._api_key}
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        return headers
 
     @staticmethod
     def _safe_error_details(response: httpx.Response) -> tuple[str | None, str]:
@@ -123,10 +160,35 @@ class GeminiImageProvider:
         )
 
     @staticmethod
+    def _transport_error(exc: Exception) -> GenerationProviderError:
+        """Classify a transport failure without exposing its message."""
+        if isinstance(exc, httpx.TimeoutException):
+            return GenerationProviderError("timeout", safe_reason_code="TRANSPORT_TIMEOUT")
+        if isinstance(exc, httpx.ProxyError):
+            return GenerationProviderError(
+                "unavailable", safe_reason_code="TRANSPORT_PROXY_FAILURE"
+            )
+        if isinstance(exc, httpx.ConnectError):
+            resolution_failed = isinstance(exc.__cause__, socket.gaierror)
+            return GenerationProviderError(
+                "unavailable",
+                safe_reason_code=(
+                    "DNS_RESOLUTION_FAILURE" if resolution_failed else "TRANSPORT_CONNECT_FAILURE"
+                ),
+            )
+        return GenerationProviderError("unavailable", safe_reason_code="TRANSPORT_FAILURE")
+
+    @staticmethod
     def build_request_parameters(request: GenerationRequest) -> dict[str, Any]:
+        """Build the documented minimal Interactions request for one PNG."""
+        if request.model.startswith(_MODEL_RESOURCE_PREFIX):
+            raise GenerationProviderError(
+                "invalid_request", safe_reason_code="DUPLICATE_MODEL_PREFIX"
+            )
         return {
-            "contents": [{"parts": [{"text": request.prompt}]}],
-            "generationConfig": {"responseModalities": ["IMAGE"]},
+            "model": request.model,
+            "input": [{"type": "text", "text": request.prompt}],
+            "response_format": {"type": "image", "mime_type": GEMINI_OUTPUT_MIME_TYPE},
         }
 
     @staticmethod
@@ -150,74 +212,15 @@ class GeminiImageProvider:
             request=response.request,
         )
 
-    def preflight_model(self, model: str) -> GeminiModelAccess:
-        """Read model metadata without performing generation."""
+    def _read_only_get(self, path: str) -> httpx.Response:
         try:
             with self._client() as client:
-                with client.stream(
-                    "GET",
-                    f"/v1beta/models/{model}",
-                    headers={"x-goog-api-key": self._api_key},
-                ) as raw_response:
-                    response = self._buffer_response(
-                        raw_response, max_bytes=_PREFLIGHT_RESPONSE_LIMIT
-                    )
+                with client.stream("GET", path, headers=self._headers(json_body=False)) as raw:
+                    response = self._buffer_response(raw, max_bytes=_METADATA_RESPONSE_LIMIT)
         except GenerationProviderError:
             raise
-        except httpx.TimeoutException:
-            raise GenerationProviderError("timeout") from None
-        except httpx.HTTPError:
-            raise GenerationProviderError("unavailable") from None
-        if 300 <= response.status_code < 400:
-            raise GenerationProviderError(
-                "malformed_response", status_code=response.status_code
-            )
-        if not response.is_success:
-            raise self._provider_error(response)
-        try:
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise TypeError
-            returned_name = payload.get("name")
-            if returned_name not in {model, f"models/{model}"}:
-                raise ValueError
-            methods = payload.get("supportedGenerationMethods")
-            if methods is not None and (
-                not isinstance(methods, list)
-                or not all(isinstance(item, str) for item in methods)
-            ):
-                raise TypeError
-            supports = "generateContent" in methods if isinstance(methods, list) else None
-        except (TypeError, ValueError):
-            raise GenerationProviderError("malformed_response") from None
-        return GeminiModelAccess(
-            model=model,
-            available=True,
-            supports_generate_content=supports,
-        )
-
-    def _request(self, request: GenerationRequest) -> httpx.Response:
-        try:
-            with self._client() as client:
-                with client.stream(
-                    "POST",
-                    f"/v1/models/{request.model}:generateContent",
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-goog-api-key": self._api_key,
-                    },
-                    json=self.build_request_parameters(request),
-                ) as raw_response:
-                    response = self._buffer_response(
-                        raw_response,
-                        max_bytes=self._max_image_bytes * 2 + _PREFLIGHT_RESPONSE_LIMIT,
-                    )
-        except GenerationProviderError:
-            raise
-        except httpx.TimeoutException:
-            raise GenerationProviderError("timeout") from None
-        except httpx.HTTPError:
-            raise GenerationProviderError("unavailable") from None
+        except httpx.HTTPError as exc:
+            raise self._transport_error(exc) from None
         if 300 <= response.status_code < 400:
             raise GenerationProviderError(
                 "malformed_response", status_code=response.status_code
@@ -226,7 +229,125 @@ class GeminiImageProvider:
             raise self._provider_error(response)
         return response
 
-    def validate_response(self, response: httpx.Response, request: GenerationRequest) -> GeneratedImage:
+    def list_models(self) -> tuple[str, ...]:
+        """Return safe model identifiers from the read-only model listing."""
+        response = self._read_only_get(f"{GEMINI_MODELS_PATH}?pageSize=200")
+        try:
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise TypeError
+            entries = payload.get("models")
+            if not isinstance(entries, list):
+                raise TypeError
+        except (TypeError, ValueError):
+            raise GenerationProviderError("malformed_response") from None
+        names: list[str] = []
+        for entry in entries:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if not isinstance(name, str):
+                continue
+            candidate = name.removeprefix(_MODEL_RESOURCE_PREFIX)
+            if _SAFE_REQUEST_ID.fullmatch(candidate) and candidate not in names:
+                names.append(candidate)
+        return tuple(names)
+
+    def preflight_model(self, model: str) -> GeminiModelAccess:
+        """Read model metadata without generating.
+
+        This is a diagnostic-only capability. A model-listing endpoint can behave
+        differently from the Interactions generation endpoint, so its result must
+        never gate a production generation request.
+        """
+        response = self._read_only_get(f"{GEMINI_MODELS_PATH}/{model}")
+        try:
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise TypeError
+            returned_name = payload.get("name")
+            if returned_name not in {model, f"{_MODEL_RESOURCE_PREFIX}{model}"}:
+                raise ValueError
+            methods = payload.get("supportedGenerationMethods")
+            if methods is None:
+                supported: tuple[str, ...] | None = None
+            elif isinstance(methods, list) and all(isinstance(item, str) for item in methods):
+                supported = tuple(
+                    method for method in methods if _SAFE_METHOD_NAME.fullmatch(method)
+                )
+            else:
+                raise TypeError
+        except (TypeError, ValueError):
+            raise GenerationProviderError("malformed_response") from None
+        return GeminiModelAccess(model=model, available=True, supported_methods=supported)
+
+    def _request(self, request: GenerationRequest) -> httpx.Response:
+        payload = self.build_request_parameters(request)
+        try:
+            with self._client() as client:
+                with client.stream(
+                    "POST",
+                    GEMINI_INTERACTIONS_PATH,
+                    headers=self._headers(json_body=True),
+                    json=payload,
+                ) as raw_response:
+                    response = self._buffer_response(
+                        raw_response,
+                        max_bytes=self._max_image_bytes * 2 + _METADATA_RESPONSE_LIMIT,
+                    )
+        except GenerationProviderError:
+            raise
+        except httpx.HTTPError as exc:
+            raise self._transport_error(exc) from None
+        if 300 <= response.status_code < 400:
+            raise GenerationProviderError(
+                "malformed_response", status_code=response.status_code
+            )
+        if not response.is_success:
+            raise self._provider_error(response)
+        return response
+
+    @staticmethod
+    def _interaction_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the documented image content blocks without inventing a schema."""
+        output_image = payload.get("output_image")
+        if isinstance(output_image, dict):
+            return [output_image]
+        steps = payload.get("steps")
+        if steps is None:
+            return []
+        if not isinstance(steps, list):
+            raise GenerationProviderError("malformed_response")
+        images: list[dict[str, Any]] = []
+        for step in steps:
+            if not isinstance(step, dict):
+                raise GenerationProviderError("malformed_response")
+            content = step.get("content")
+            if content is None:
+                continue
+            if not isinstance(content, list):
+                raise GenerationProviderError("malformed_response")
+            images.extend(
+                block
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "image"
+            )
+        return images
+
+    @classmethod
+    def _reject_incomplete_status(cls, payload: dict[str, Any]) -> None:
+        status = payload.get("status")
+        if status is None or status == _COMPLETED_STATUS:
+            return
+        if status == _BUDGET_STATUS:
+            raise GenerationProviderError(
+                "quota_or_billing", safe_reason_code="BUDGET_EXCEEDED"
+            )
+        raise GenerationProviderError(
+            "malformed_response", safe_reason_code="INTERACTION_NOT_COMPLETED"
+        )
+
+    def validate_response(
+        self, response: httpx.Response, request: GenerationRequest
+    ) -> GeneratedImage:
         declared = response.headers.get("content-length")
         if declared is not None:
             try:
@@ -236,31 +357,16 @@ class GeminiImageProvider:
                 raise GenerationProviderError("malformed_response") from None
         try:
             payload = response.json()
-            candidates = payload.get("candidates")
-            if not isinstance(candidates, list) or not candidates:
+            if not isinstance(payload, dict):
                 raise GenerationProviderError("malformed_response")
-            images: list[dict[str, Any]] = []
-            for candidate in candidates:
-                if not isinstance(candidate, dict):
-                    raise GenerationProviderError("malformed_response")
-                content = candidate.get("content")
-                parts = content.get("parts") if isinstance(content, dict) else None
-                if not isinstance(parts, list):
-                    raise GenerationProviderError("malformed_response")
-                images.extend(
-                    image
-                    for part in parts
-                    if isinstance(part, dict)
-                    and isinstance(
-                        image := part.get("inlineData", part.get("inline_data")), dict
-                    )
-                )
+            self._reject_incomplete_status(payload)
+            images = self._interaction_images(payload)
             if len(images) != 1:
                 raise GenerationProviderError("malformed_response")
             image = images[0]
-            mime_type = image.get("mimeType", image.get("mime_type"))
+            mime_type = image.get("mime_type", image.get("mimeType"))
             encoded = image.get("data")
-            if mime_type != "image/png":
+            if mime_type != GEMINI_OUTPUT_MIME_TYPE:
                 raise GenerationProviderError("non_png_response")
             if not isinstance(encoded, str) or not encoded:
                 raise GenerationProviderError("malformed_response")
@@ -274,14 +380,25 @@ class GeminiImageProvider:
         if not data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise GenerationProviderError("non_png_response")
         request_id = response.headers.get("x-request-id")
-        safe_request_id = request_id if request_id and _SAFE_REQUEST_ID.fullmatch(request_id) else None
+        safe_request_id = (
+            request_id if request_id and _SAFE_REQUEST_ID.fullmatch(request_id) else None
+        )
+        metadata: dict[str, Any] = {
+            "output_format": "png",
+            "requested_size": request.size,
+            "provider_api": "interactions",
+            "provider_api_version": GEMINI_API_VERSION,
+        }
+        display_name = provider_model_display_name(GOOGLE_GEMINI_PROVIDER, request.model)
+        if display_name is not None:
+            metadata["provider_model_name"] = display_name
         return GeneratedImage(
             data=data,
-            provider="gemini",
+            provider=GOOGLE_GEMINI_PROVIDER,
             model=request.model,
             provider_request_id=safe_request_id,
             provider_created_at=self._now(),
-            safe_generation_metadata={"output_format": "png", "requested_size": request.size},
+            safe_generation_metadata=metadata,
             seed=request.seed,
             ai_generated=True,
         )

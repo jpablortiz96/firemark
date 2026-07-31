@@ -40,6 +40,7 @@ def test_public_certificate_has_only_safe_fields_and_utc_time() -> None:
     payload = certificate.model_dump(mode="json")
     assert set(payload) == {
             "schema_version", "cert_id", "asset_id", "run_id", "provider", "model",
+            "provider_model_name",
             "media_type", "mime_type", "byte_size", "ai_generated", "width", "height",
             "duration_ms", "source_sha256", "sealed_sha256",
         "canonical_hash", "signer_key_id", "signer_public_key_b64", "signature_b64",

@@ -203,6 +203,7 @@ class PublicCertificate(FrozenModel):
     run_id: str
     provider: str
     model: str
+    provider_model_name: str | None = None
     media_type: AssetType
     mime_type: str
     byte_size: int = Field(gt=0)

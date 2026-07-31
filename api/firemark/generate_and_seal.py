@@ -28,6 +28,11 @@ from api.firemark.generation.models import (
     MediaType,
 )
 from api.firemark.generation.provider import AudioGenerationProvider, GenerationProvider
+from api.firemark.generation.provider_identity import (
+    GOOGLE_GEMINI_PROVIDER,
+    normalize_provider,
+    provider_model_display_name,
+)
 from api.firemark.hashing import sha256_bytes
 from api.firemark.public_capsule import (
     FiremarkPublicAudioReferenceV1,
@@ -63,7 +68,7 @@ class GenerateAndSealRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     media_type: MediaType = "image"
-    provider: Literal["openai", "gemini", "elevenlabs"] | None = None
+    provider: Literal["openai", "google_gemini", "elevenlabs"] | None = None
     prompt: str | None = Field(default=None, min_length=1, max_length=4000, repr=False)
     text: str | None = Field(default=None, min_length=1, max_length=5000, repr=False)
     model: str | None = None
@@ -81,6 +86,12 @@ class GenerateAndSealRequest(BaseModel):
             raise ValueError("Generation text must not be blank")
         return normalized
 
+    @field_validator("provider", mode="before")
+    @classmethod
+    def normalize_provider_alias(cls, value: object) -> object:
+        """Accept the historical `gemini` label but store the accurate identity."""
+        return normalize_provider(value) if isinstance(value, str) else value
+
     @field_validator("model", "model_id", "voice_id")
     @classmethod
     def validate_optional_model(cls, value: str | None) -> str | None:
@@ -92,7 +103,7 @@ class GenerateAndSealRequest(BaseModel):
     def validate_media_request(self) -> GenerateAndSealRequest:
         if self.media_type == "image":
             if self.provider == "elevenlabs":
-                raise ValueError("Image generation requires OpenAI or Gemini")
+                raise ValueError("Image generation requires OpenAI or Google Gemini")
             if self.prompt is None or self.text is not None:
                 raise ValueError("Image generation requires prompt and forbids text")
             if self.voice_id is not None or self.model_id is not None:
@@ -135,6 +146,7 @@ class GenerateAndSealResult(BaseModel):
     cert_id: str
     provider: str
     model: str
+    provider_model_name: str | None = None
     media_type: MediaType
     mime_type: str
     byte_size: int = Field(gt=0)
@@ -316,6 +328,9 @@ class GenerateAndSealService:
                 "cert_id": cert_id,
                 "provider": certificate.provider,
                 "model": certificate.model,
+                "provider_model_name": provider_model_display_name(
+                    certificate.provider, certificate.model
+                ),
                 "media_type": certificate.media_type,
                 "mime_type": certificate.mime_type,
                 "byte_size": certificate.byte_size,
@@ -343,7 +358,9 @@ class GenerateAndSealService:
             private_text = request.prompt
             assert private_text is not None
             model = request.model or (
-                self.default_gemini_model if provider_name == "gemini" else self.default_model
+                self.default_gemini_model
+                if provider_name == GOOGLE_GEMINI_PROVIDER
+                else self.default_model
             )
             size = request.size or self.default_size
             voice_id = None
@@ -389,7 +406,7 @@ class GenerateAndSealService:
                 )
                 factory = (
                     self.gemini_provider_factory
-                    if provider_name == "gemini"
+                    if provider_name == GOOGLE_GEMINI_PROVIDER
                     else self.provider_factory
                 )
                 if factory is None:

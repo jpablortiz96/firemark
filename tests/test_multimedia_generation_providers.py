@@ -38,47 +38,27 @@ def _gemini_request() -> GenerationRequest:
 
 def _gemini_body(data: str | None = None, mime_type: str = "image/png") -> dict[str, object]:
     return {
-        "candidates": [
-            {
-                "content": {
-                    "parts": [
-                        {
-                            "inlineData": {
-                                "mimeType": mime_type,
-                                "data": data or base64.b64encode(_TINY_PNG).decode(),
-                            }
-                        }
-                    ]
-                }
-            }
-        ]
+        "id": "interaction-1",
+        "object": "interaction",
+        "status": "completed",
+        "output_image": {
+            "type": "image",
+            "mime_type": mime_type,
+            "data": data or base64.b64encode(_TINY_PNG).decode(),
+        },
     }
 
 
 def test_gemini_generates_one_bounded_png_without_leaking_key() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/gemini-3.1-flash-image:generateContent")
+        assert request.url.path == "/v1beta/interactions"
         assert request.headers["x-goog-api-key"] == "gemini-secret"
+        assert "authorization" not in request.headers
         assert b"private image prompt" in request.content
         return httpx.Response(
             200,
             headers={"x-request-id": "gemini-request-1"},
-            json={
-                "candidates": [
-                    {
-                        "content": {
-                            "parts": [
-                                {
-                                    "inlineData": {
-                                        "mimeType": "image/png",
-                                        "data": base64.b64encode(_TINY_PNG).decode(),
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            },
+            json=_gemini_body(),
         )
 
     provider = GeminiImageProvider(
@@ -97,7 +77,8 @@ def test_gemini_generates_one_bounded_png_without_leaking_key() -> None:
         )
     )
     assert image.data == _TINY_PNG
-    assert image.provider == "gemini" and image.ai_generated
+    assert image.provider == "google_gemini" and image.ai_generated
+    assert image.safe_generation_metadata["provider_model_name"] == "Nano Banana 2"
     assert "gemini-secret" not in repr(provider)
 
 
@@ -148,9 +129,9 @@ def test_gemini_default_client_and_transport_failures_are_safe() -> None:
         (httpx.Response(200, headers={"content-length": "9999"}, json=_gemini_body()), "response_too_large"),
         (httpx.Response(200, headers={"content-length": "bad"}, json=_gemini_body()), "malformed_response"),
         (httpx.Response(200, json={}), "malformed_response"),
-        (httpx.Response(200, json={"candidates": [None]}), "malformed_response"),
-        (httpx.Response(200, json={"candidates": [{"content": {}}]}), "malformed_response"),
-        (httpx.Response(200, json={"candidates": [{"content": {"parts": []}}]}), "malformed_response"),
+        (httpx.Response(200, json={"steps": [None]}), "malformed_response"),
+        (httpx.Response(200, json={"steps": [{"content": {}}]}), "malformed_response"),
+        (httpx.Response(200, json={"steps": [{"content": []}]}), "malformed_response"),
         (httpx.Response(200, json=_gemini_body(mime_type="image/jpeg")), "non_png_response"),
         (httpx.Response(200, json=_gemini_body("%%%")), "malformed_response"),
         (httpx.Response(200, json=_gemini_body(base64.b64encode(b"not-png").decode())), "non_png_response"),
@@ -340,7 +321,7 @@ def test_audio_models_reject_unsafe_private_and_provider_metadata() -> None:
 def test_image_model_rejects_unsafe_metadata_and_naive_time() -> None:
     values = {
         "data": _TINY_PNG,
-        "provider": "gemini",
+        "provider": "google_gemini",
         "model": "gemini-image",
         "provider_created_at": NOW,
         "ai_generated": True,
