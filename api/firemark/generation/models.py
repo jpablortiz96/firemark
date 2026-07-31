@@ -6,13 +6,20 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+JPEG_MAGIC = b"\xff\xd8\xff"
 MP3_ID3_MAGIC = b"ID3"
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 MediaType = Literal["image", "audio"]
+#: Source formats a provider may deliver. FIREMARK always seals a PNG carrier,
+#: but it never relabels source bytes to claim they already are one.
+SourceImageMimeType = Literal["image/png", "image/jpeg"]
+SourceImageExtension = Literal["png", "jpg"]
+_SOURCE_IMAGE_MAGIC: dict[str, bytes] = {"image/png": PNG_MAGIC, "image/jpeg": JPEG_MAGIC}
+_SOURCE_IMAGE_EXTENSIONS: dict[str, str] = {"image/png": "png", "image/jpeg": "jpg"}
 
 
 class GenerationRequest(BaseModel):
@@ -44,13 +51,21 @@ class GenerationRequest(BaseModel):
 
 
 class GeneratedImage(BaseModel):
-    """Validated immutable PNG returned by a generation provider."""
+    """Validated immutable provider source image.
+
+    ``data`` holds the exact bytes the provider produced, in whatever format it
+    delivered. ``source_mime_type`` and ``source_extension`` describe those
+    bytes truthfully; a JPEG source is never labelled PNG. The sealed PNG
+    carrier is produced separately by the normalization boundary.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     data: bytes = Field(repr=False)
-    media_type: Literal["image/png"] = "image/png"
-    file_extension: Literal["png"] = "png"
+    source_mime_type: SourceImageMimeType = "image/png"
+    source_extension: SourceImageExtension = "png"
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
     provider: str
     model: str
     provider_request_id: str | None = None
@@ -59,12 +74,28 @@ class GeneratedImage(BaseModel):
     seed: int | None = None
     ai_generated: bool
 
-    @field_validator("data")
-    @classmethod
-    def validate_png(cls, value: bytes) -> bytes:
-        if not value.startswith(PNG_MAGIC):
-            raise ValueError("Generated image is not a PNG")
-        return value
+    @property
+    def source_bytes(self) -> bytes:
+        """The untouched provider bytes that define ``source_sha256``."""
+        return self.data
+
+    @property
+    def media_type(self) -> str:
+        """Source MIME type, used for private source custody."""
+        return self.source_mime_type
+
+    @property
+    def file_extension(self) -> str:
+        """Source file extension, used for private source custody."""
+        return self.source_extension
+
+    @model_validator(mode="after")
+    def validate_source_format(self) -> GeneratedImage:
+        if not self.data.startswith(_SOURCE_IMAGE_MAGIC[self.source_mime_type]):
+            raise ValueError(f"Generated image is not a {self.source_mime_type}")
+        if self.source_extension != _SOURCE_IMAGE_EXTENSIONS[self.source_mime_type]:
+            raise ValueError("Source extension does not match the source MIME type")
+        return self
 
     @field_validator("provider", "model")
     @classmethod

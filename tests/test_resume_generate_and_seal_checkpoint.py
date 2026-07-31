@@ -54,7 +54,7 @@ def production_evidence() -> tuple[bytes, bytes, str]:
     )
     image = GeneratedImage(
         data=source,
-        media_type="image/png",
+        source_mime_type="image/png",
         provider="openai",
         model="gpt-image-test",
         provider_request_id="safe-test-request",

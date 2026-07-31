@@ -9,6 +9,7 @@ import re
 import tempfile
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -21,12 +22,14 @@ from api.firemark.control_plane.models import AssetRecord, CustodyRecord, Genera
 from api.firemark.control_plane.service import CertificateService
 from api.firemark.custody import B2CustodyReceipt, StoredObjectReceipt, execute_b2_custody
 from api.firemark.generation.models import (
+    PNG_MAGIC,
     AudioGenerationRequest,
     GeneratedImage,
     GeneratedMedia,
     GenerationRequest,
     MediaType,
 )
+from api.firemark.generation.normalization import ImageNormalizationError, normalize_to_png
 from api.firemark.generation.provider import AudioGenerationProvider, GenerationProvider
 from api.firemark.generation.provider_identity import (
     GOOGLE_GEMINI_PROVIDER,
@@ -199,6 +202,46 @@ def _identifiers(idempotency_key: str) -> tuple[str, str, str]:
     return identifier("run"), identifier("asset"), identifier("cert")
 
 
+SEALED_IMAGE_MIME_TYPE = "image/png"
+SEALED_IMAGE_EXTENSION = "png"
+NORMALIZATION_PURPOSE = "firemark_public_capsule_embedding"
+
+
+@dataclass(frozen=True)
+class _PngCarrier:
+    """The PNG bytes the public capsule is embedded into.
+
+    A PNG source is carried through untouched so existing evidence stays byte
+    identical. A non-PNG source is decoded and deterministically re-encoded; the
+    original source bytes are never modified and still define ``source_sha256``.
+    """
+
+    data: bytes
+    record: dict[str, str] | None
+
+
+def _png_carrier(media: GeneratedImage, *, stage_callback: StageCallback) -> _PngCarrier:
+    if media.source_mime_type == SEALED_IMAGE_MIME_TYPE:
+        return _PngCarrier(data=media.data, record=None)
+    stage_callback("deterministic_png_normalization")
+    try:
+        normalized = normalize_to_png(media.data, source_mime_type=media.source_mime_type)
+    except ImageNormalizationError as exc:
+        raise GenerateAndSealError(f"IMAGE_NORMALIZATION_{exc.code.upper()}") from None
+    stage_callback("normalized_png_validation")
+    if not normalized.data.startswith(PNG_MAGIC):
+        raise GenerateAndSealError("IMAGE_NORMALIZATION_NON_PNG_NORMALIZED_OUTPUT")
+    return _PngCarrier(
+        data=normalized.data,
+        record={
+            "operation": "normalize_image",
+            "input_mime_type": media.source_mime_type,
+            "output_mime_type": normalized.mime_type,
+            "purpose": NORMALIZATION_PURPOSE,
+        },
+    )
+
+
 def _build_manifest(
     media: GeneratedMedia,
     private_text: str | GenerationRequest,
@@ -206,6 +249,7 @@ def _build_manifest(
     *,
     run_id: str,
     source_sha256: str,
+    normalization: dict[str, str] | None = None,
 ) -> Manifest:
     if isinstance(private_text, GenerationRequest):
         provider_parameters = private_text.provider_parameters
@@ -228,6 +272,11 @@ def _build_manifest(
             provider_request_id=media.provider_request_id,
             provider_created_at=media.provider_created_at.isoformat(),
             **media.safe_generation_metadata,
+            **(
+                {"firemark_normalization": dict(normalization)}
+                if normalization is not None
+                else {}
+            ),
         )
     )
     if isinstance(media, GeneratedImage) and media.seed is not None:
@@ -439,6 +488,11 @@ class GenerateAndSealService:
                 raise GenerateAndSealError("GENERATED_MEDIA_TOO_LARGE")
             self._stage_callback("source_hash")
             source_sha256 = sha256_bytes(media.data)
+            carrier = (
+                _png_carrier(media, stage_callback=self._stage_callback)
+                if isinstance(media, GeneratedImage)
+                else None
+            )
             self._stage_callback("genblaze_manifest")
             manifest = _build_manifest(
                 media,
@@ -446,6 +500,7 @@ class GenerateAndSealService:
                 provider_parameters,
                 run_id=run_id,
                 source_sha256=source_sha256,
+                normalization=carrier.record if carrier is not None else None,
             )
             manifest_bytes = manifest.to_canonical_json().encode("utf-8")
             self._stage_callback("canonical_hash")
@@ -466,17 +521,22 @@ class GenerateAndSealService:
             width: int | None
             height: int | None
             if isinstance(media, GeneratedImage):
+                assert carrier is not None
                 self._stage_callback("public_capsule_embedding")
                 capsule = FiremarkPublicCapsuleV1.model_validate(public_values)
-                sealed_bytes = embed_public_capsule_png(media.data, capsule)
+                sealed_bytes = embed_public_capsule_png(carrier.data, capsule)
                 public_manifest: dict[str, object] = capsule.model_dump(mode="json")
-                width, height = _png_dimensions(media.data)
+                width, height = _png_dimensions(carrier.data)
                 duration_ms = None
+                sealed_mime_type = SEALED_IMAGE_MIME_TYPE
+                sealed_extension = SEALED_IMAGE_EXTENSION
             else:
                 self._stage_callback("public_reference_construction")
                 sealed_bytes = media.data
                 width = height = None
                 duration_ms = media.duration_ms
+                sealed_mime_type = media.media_type
+                sealed_extension = media.file_extension
             self._stage_callback("sealed_hash")
             sealed_sha256 = sha256_bytes(sealed_bytes)
             if media_type == "image" and hmac.compare_digest(source_sha256, sealed_sha256):
@@ -502,6 +562,10 @@ class GenerateAndSealService:
                     "provider": media.provider,
                     "model": media.model,
                     "media_type": media_type,
+                    "mime_type": sealed_mime_type,
+                    "file_extension": sealed_extension,
+                    "source_mime_type": media.media_type,
+                    "source_extension": media.file_extension,
                     "size": size,
                     "voice_id": voice_id,
                     "source_bytes": media.data,
@@ -533,14 +597,14 @@ class GenerateAndSealService:
                 )
             self._checkpoint_callback("custody_persisted", {"custody_receipt": custody_receipt})
             self._stage_callback("sealed_asset_upload")
-            sealed_key = sealed_asset_key(sealed_sha256, media.file_extension)
+            sealed_key = sealed_asset_key(sealed_sha256, sealed_extension)
             sealed_receipt = self.sealed_uploader(
                 assets_client,
                 bucket=self.assets_bucket,
                 key=sealed_key,
                 data=sealed_bytes,
                 expected_sha256=sealed_sha256,
-                content_type=media.media_type,
+                content_type=sealed_mime_type,
                 metadata={
                     "firemark-kind": "sealed",
                     "firemark-schema": "1",
@@ -575,6 +639,10 @@ class GenerateAndSealService:
                     "requested_size": size,
                     "voice_id": voice_id,
                     "media_type": media_type,
+                    "provider_source_mime_type": (
+                        media.source_mime_type if isinstance(media, GeneratedImage) else None
+                    ),
+                    "normalization": carrier.record if carrier is not None else None,
                     "provider": media.safe_generation_metadata,
                 },
                 seed_private=media.seed if isinstance(media, GeneratedImage) else None,
@@ -587,8 +655,8 @@ class GenerateAndSealService:
                 asset_id=asset_id,
                 run_id=run_id,
                 asset_type=media_type,
-                media_type=media.media_type,
-                file_extension=media.file_extension,
+                media_type=sealed_mime_type,
+                file_extension=sealed_extension,
                 byte_size=len(sealed_bytes),
                 width=width,
                 height=height,

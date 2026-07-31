@@ -71,6 +71,7 @@ from api.firemark.generation.models import (
     GeneratedImage,
     GenerationRequest,
 )
+from api.firemark.generation.normalization import normalize_to_png
 from api.firemark.generation.provider import GenerationProviderError
 from api.firemark.generation.provider_identity import GOOGLE_GEMINI_PROVIDER
 from api.firemark.hashing import sha256_bytes
@@ -220,8 +221,13 @@ class MultimodalCheckpoint(BaseModel):
     )
     operation_state: OperationState
     media_type: MediaKind
+    #: The distributable sealed carrier.
     mime_type: Literal["image/png", "audio/mpeg"]
     file_extension: Literal["png", "mp3"]
+    #: The exact format the provider delivered. It is never relabelled and it
+    #: defines what private source custody stores.
+    source_mime_type: str | None = None
+    source_extension: str | None = None
     provider: Literal["google_gemini", "elevenlabs"]
     model: str
     size: str | None = None
@@ -267,6 +273,15 @@ class MultimodalCheckpoint(BaseModel):
         ):
             raise ValueError("Checkpoint digest is invalid")
         return value
+
+    @property
+    def custody_mime_type(self) -> str:
+        """The MIME type private source custody stores, never the sealed one."""
+        return self.source_mime_type or self.mime_type
+
+    @property
+    def custody_extension(self) -> str:
+        return self.source_extension or self.file_extension
 
 
 class CheckpointStore:
@@ -327,6 +342,10 @@ class CheckpointStore:
         }
         if isinstance(media, GeneratedImage):
             metadata["seed"] = media.seed
+            metadata["source_mime_type"] = media.source_mime_type
+            metadata["source_extension"] = media.source_extension
+            metadata["width"] = media.width
+            metadata["height"] = media.height
         else:
             metadata["voice_id"] = media.voice_id
             metadata["duration_ms"] = media.duration_ms
@@ -335,7 +354,16 @@ class CheckpointStore:
             "generated-metadata.json",
             json.dumps(metadata, ensure_ascii=True, sort_keys=True).encode("utf-8"),
         )
+        source_updates: dict[str, object] = (
+            {
+                "source_mime_type": media.source_mime_type,
+                "source_extension": media.source_extension,
+            }
+            if isinstance(media, GeneratedImage)
+            else {}
+        )
         self.update(
+            **source_updates,
             operation_state="generated",
             source_sha256=sha256_bytes(media.data),
             generated_byte_count=len(media.data),
@@ -376,6 +404,8 @@ class CheckpointStore:
                 issued_at=values["issued_at"],
                 requested_retention_until=values["requested_retention_until"],
                 signer_key_id=values["signer_key_id"],
+                source_mime_type=values.get("source_mime_type"),
+                source_extension=values.get("source_extension"),
                 manifest_path=str(manifest_path),
             )
             return
@@ -594,7 +624,14 @@ def _read_generated_media(
             "ai_generated": metadata["ai_generated"],
         }
         if checkpoint.media_type == "image":
-            return GeneratedImage(**common, seed=metadata.get("seed"))
+            return GeneratedImage(
+                **common,
+                seed=metadata.get("seed"),
+                source_mime_type=metadata.get("source_mime_type", "image/png"),
+                source_extension=metadata.get("source_extension", "png"),
+                width=metadata.get("width"),
+                height=metadata.get("height"),
+            )
         return GeneratedAudio(
             **common,
             voice_id=metadata["voice_id"],
@@ -661,7 +698,14 @@ def _reconstruct_sealed(
     }
     if checkpoint.media_type == "image":
         capsule = FiremarkPublicCapsuleV1.model_validate(common)
-        sealed = embed_public_capsule_png(source, capsule)
+        carrier = (
+            source
+            if checkpoint.custody_mime_type == "image/png"
+            else normalize_to_png(
+                source, source_mime_type=checkpoint.custody_mime_type
+            ).data
+        )
+        sealed = embed_public_capsule_png(carrier, capsule)
         public_manifest: dict[str, object] = capsule.model_dump(mode="json")
     else:
         sealed = source
@@ -772,7 +816,7 @@ def _load_or_create_custody(
             custody_verified=True,
         )
     with tempfile.TemporaryDirectory(prefix="firemark-multimodal-recovery-") as directory:
-        source_path = Path(directory) / f"source.{checkpoint.file_extension}"
+        source_path = Path(directory) / f"source.{checkpoint.custody_extension}"
         source_path.write_bytes(source)
         custody = execute_b2_custody(
             assets_client=assets_client,
@@ -785,9 +829,9 @@ def _load_or_create_custody(
             canonical_hash=checkpoint.canonical_hash,
             run_id=checkpoint.run_id,
             cert_id=checkpoint.cert_id,
-            extension=checkpoint.file_extension,
+            extension=checkpoint.custody_extension,
             retention_until=checkpoint.requested_retention_until,
-            source_content_type=checkpoint.mime_type,
+            source_content_type=checkpoint.custody_mime_type,
             now=checkpoint.issued_at,
             stage_callback=tracker.core_stage,
             persistence_callback=store.persist_partials,
@@ -868,6 +912,7 @@ def _register_recovered(
     public_manifest: dict[str, object],
     step: Any,
     generated_media: GeneratedImage | GeneratedAudio,
+    sealed_carrier: bytes,
 ) -> None:
     if (
         checkpoint.source_sha256 is None
@@ -936,7 +981,7 @@ def _register_recovered(
     height: int | None = None
     duration_ms: int | None = None
     if isinstance(generated_media, GeneratedImage):
-        width, height = _png_dimensions(generated_media.data)
+        width, height = _png_dimensions(sealed_carrier)
     else:
         duration_ms = generated_media.duration_ms
     asset = AssetRecord(
@@ -1148,6 +1193,7 @@ def _operation_report(checkpoint: MultimodalCheckpoint) -> dict[str, object]:
         "model": checkpoint.model,
         "media_type": checkpoint.media_type,
         "mime_type": checkpoint.mime_type,
+        "source_mime_type": checkpoint.custody_mime_type,
         "byte_size": sealed_asset.size_bytes,
         "run_id": checkpoint.run_id,
         "asset_id": checkpoint.asset_id,
@@ -1455,6 +1501,7 @@ def _run_operation(
             public_manifest,
             step,
             generated_media,
+            sealed,
         )
         checkpoint = store.read()
     return _verify_and_deliver(

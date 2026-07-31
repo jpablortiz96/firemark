@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from api.firemark.generation.elevenlabs_provider import ElevenLabsAudioProvider
-from api.firemark.generation.fake_provider import _TINY_MP3, _TINY_PNG
+from api.firemark.generation.fake_provider import _TINY_JPEG, _TINY_MP3, _TINY_PNG
 from api.firemark.generation.gemini_provider import GeminiImageProvider
 from api.firemark.generation.models import (
     AudioGenerationRequest,
@@ -36,7 +36,7 @@ def _gemini_request() -> GenerationRequest:
     )
 
 
-def _gemini_body(data: str | None = None, mime_type: str = "image/png") -> dict[str, object]:
+def _gemini_body(data: str | None = None, mime_type: str = "image/jpeg") -> dict[str, object]:
     return {
         "id": "interaction-1",
         "object": "interaction",
@@ -44,12 +44,12 @@ def _gemini_body(data: str | None = None, mime_type: str = "image/png") -> dict[
         "output_image": {
             "type": "image",
             "mime_type": mime_type,
-            "data": data or base64.b64encode(_TINY_PNG).decode(),
+            "data": data or base64.b64encode(_TINY_JPEG).decode(),
         },
     }
 
 
-def test_gemini_generates_one_bounded_png_without_leaking_key() -> None:
+def test_gemini_generates_one_bounded_jpeg_source_without_leaking_key() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1beta/interactions"
         assert request.headers["x-goog-api-key"] == "gemini-secret"
@@ -76,8 +76,9 @@ def test_gemini_generates_one_bounded_png_without_leaking_key() -> None:
             request_id="firemark-run-gemini",
         )
     )
-    assert image.data == _TINY_PNG
+    assert image.data == _TINY_JPEG
     assert image.provider == "google_gemini" and image.ai_generated
+    assert image.source_mime_type == "image/jpeg" and image.source_extension == "jpg"
     assert image.safe_generation_metadata["provider_model_name"] == "Nano Banana 2"
     assert "gemini-secret" not in repr(provider)
 
@@ -132,9 +133,9 @@ def test_gemini_default_client_and_transport_failures_are_safe() -> None:
         (httpx.Response(200, json={"steps": [None]}), "malformed_response"),
         (httpx.Response(200, json={"steps": [{"content": {}}]}), "malformed_response"),
         (httpx.Response(200, json={"steps": [{"content": []}]}), "malformed_response"),
-        (httpx.Response(200, json=_gemini_body(mime_type="image/jpeg")), "non_png_response"),
+        (httpx.Response(200, json=_gemini_body(mime_type="image/png")), "unsupported_media_type"),
         (httpx.Response(200, json=_gemini_body("%%%")), "malformed_response"),
-        (httpx.Response(200, json=_gemini_body(base64.b64encode(b"not-png").decode())), "non_png_response"),
+        (httpx.Response(200, json=_gemini_body(base64.b64encode(b"not-jpeg").decode())), "unsupported_media_type"),
     ],
 )
 def test_gemini_rejects_malformed_or_unbounded_responses(

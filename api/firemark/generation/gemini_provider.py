@@ -7,10 +7,15 @@ generation contract is the documented Interactions API:
     x-goog-api-key: <GEMINI_API_KEY>
     {"model": "<model>",
      "input": [{"type": "text", "text": "<prompt>"}],
-     "response_format": {"type": "image", "mime_type": "image/png",
+     "response_format": {"type": "image", "mime_type": "image/jpeg",
                          "aspect_ratio": "1:1", "image_size": "1K",
                          "delivery": "uri"},
      "stream": false, "background": false, "store": false}
+
+``ImageResponseFormat`` accepts ``image/jpeg`` for URI delivery; ``image/png``
+is rejected there with HTTP 400 INVALID_REQUEST. FIREMARK therefore requests the
+accurate JPEG source and normalizes it into the sealed PNG carrier separately,
+so a JPEG is never relabelled as a PNG.
 
 `delivery: "uri"` keeps the synchronous interaction response small. A large
 inline Base64 image forces a multi-megabyte body through the same connection
@@ -37,17 +42,42 @@ import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlsplit
 
 import httpx
 
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
+from api.firemark.generation.normalization import (
+    ImageNormalizationError,
+    inspect_image_source,
+)
 from api.firemark.generation.provider import GenerationProviderError, ProviderFailureCode
 from api.firemark.generation.provider_identity import (
     GOOGLE_GEMINI_PROVIDER,
     provider_model_display_name,
 )
+
+#: Normalization failures mapped to safe provider failure codes. The reason code
+#: preserves the exact structural cause without echoing any image bytes.
+_NORMALIZATION_FAILURES: dict[str, ProviderFailureCode] = {
+    "unsupported_source_mime": "unsupported_media_type",
+    "non_jpeg_source": "unsupported_media_type",
+    "malformed_image": "malformed_response",
+    "image_dimensions_exceeded": "response_too_large",
+    "image_pixels_exceeded": "response_too_large",
+    "image_decoding_failure": "malformed_response",
+    "png_normalization_failure": "malformed_response",
+    "non_png_normalized_output": "non_png_response",
+}
+
+
+def _normalization_error(exc: ImageNormalizationError) -> GenerationProviderError:
+    """Translate a normalization failure into a safe provider failure."""
+    return GenerationProviderError(
+        _NORMALIZATION_FAILURES.get(exc.code, "malformed_response"),
+        safe_reason_code=exc.code.upper(),
+    )
 
 HTTPClientFactory = Callable[[], httpx.Client]
 StageCallback = Callable[[str], None]
@@ -57,7 +87,14 @@ GEMINI_API_BASE_URL = f"https://{GEMINI_API_HOST}"
 GEMINI_API_VERSION = "v1beta"
 GEMINI_INTERACTIONS_PATH = f"/{GEMINI_API_VERSION}/interactions"
 GEMINI_MODELS_PATH = f"/{GEMINI_API_VERSION}/models"
-GEMINI_OUTPUT_MIME_TYPE = "image/png"
+#: The Interactions ``ImageResponseFormat`` accepts ``image/jpeg`` for URI
+#: delivery. Requesting ``image/png`` there is rejected with HTTP 400
+#: INVALID_REQUEST, so FIREMARK asks for the accurate JPEG source and
+#: normalizes it into the sealed PNG carrier afterwards.
+GEMINI_REQUEST_MIME_TYPE: Final = "image/jpeg"
+GEMINI_SOURCE_MIME_TYPE: Final = "image/jpeg"
+GEMINI_SOURCE_EXTENSION: Final = "jpg"
+GEMINI_SEALED_MIME_TYPE: Final = "image/png"
 GEMINI_IMAGE_ASPECT_RATIO = "1:1"
 GEMINI_IMAGE_SIZE = "1K"
 GEMINI_IMAGE_DELIVERY = "uri"
@@ -72,8 +109,9 @@ GOOGLE_MEDIA_HOST_SUFFIXES = (".googleapis.com", ".googleusercontent.com")
 API_KEY_HOSTS = frozenset({GEMINI_API_HOST})
 MAX_IMAGE_URI_LENGTH = 2048
 MAX_IMAGE_URI_REDIRECTS = 1
-#: Binary image types Google documents for generated image delivery. Only PNG is
-#: accepted as a FIREMARK source; the others are reported as NON_PNG_RESPONSE.
+#: Binary image types Google documents for generated image delivery. Only the
+#: requested JPEG is accepted as a FIREMARK source; anything else is reported as
+#: an unsupported provider source MIME type.
 DOCUMENTED_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
 
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -82,7 +120,6 @@ _METADATA_RESPONSE_LIMIT = 512 * 1024
 _MODEL_RESOURCE_PREFIX = "models/"
 _COMPLETED_STATUS = "completed"
 _BUDGET_STATUS = "budget_exceeded"
-_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 #: httpx failure classes mapped to a stable safe reason code. Order matters:
 #: the most specific class must be tested first.
@@ -134,7 +171,7 @@ class _DownloadedImage:
 
 
 class GeminiImageProvider:
-    """Generate exactly one PNG through Google's documented Interactions API."""
+    """Generate exactly one JPEG source through Google's documented Interactions API."""
 
     def __init__(
         self,
@@ -295,7 +332,7 @@ class GeminiImageProvider:
             "input": [{"type": "text", "text": request.prompt}],
             "response_format": {
                 "type": "image",
-                "mime_type": GEMINI_OUTPUT_MIME_TYPE,
+                "mime_type": GEMINI_REQUEST_MIME_TYPE,
                 "aspect_ratio": GEMINI_IMAGE_ASPECT_RATIO,
                 "image_size": GEMINI_IMAGE_SIZE,
                 "delivery": GEMINI_IMAGE_DELIVERY,
@@ -560,7 +597,7 @@ class GeminiImageProvider:
 
     def _download_image(self, uri: str, *, send_api_key: bool) -> _DownloadedImage:
         """Download the generated image through an independent bounded client."""
-        self._stage("image_download")
+        self._stage("jpeg_download")
         target = uri
         authorized = send_api_key
         redirects_remaining = MAX_IMAGE_URI_REDIRECTS
@@ -594,9 +631,12 @@ class GeminiImageProvider:
             raise GenerationProviderError(
                 "malformed_response", safe_reason_code="IMAGE_CONTENT_TYPE_REJECTED"
             )
-        if content_type != GEMINI_OUTPUT_MIME_TYPE:
-            # Reject before reading the body; FIREMARK adds no lossy conversion.
-            raise GenerationProviderError("non_png_response")
+        if content_type != GEMINI_SOURCE_MIME_TYPE:
+            # Reject before reading the body. FIREMARK never relabels a source
+            # format it did not request.
+            raise GenerationProviderError(
+                "unsupported_media_type", safe_reason_code="PROVIDER_SOURCE_MIME_UNSUPPORTED"
+            )
         declared_header = response.headers.get("content-length")
         declared: int | None = None
         if declared_header is not None:
@@ -637,8 +677,10 @@ class GeminiImageProvider:
             raise GenerationProviderError("malformed_response") from None
         if len(data) > self._max_image_bytes:
             raise GenerationProviderError("response_too_large")
-        if reference.mime_type != GEMINI_OUTPUT_MIME_TYPE:
-            raise GenerationProviderError("non_png_response")
+        if reference.mime_type != GEMINI_SOURCE_MIME_TYPE:
+            raise GenerationProviderError(
+                "unsupported_media_type", safe_reason_code="PROVIDER_SOURCE_MIME_UNSUPPORTED"
+            )
         return _DownloadedImage(
             data=data,
             mime_type=reference.mime_type,
@@ -652,7 +694,7 @@ class GeminiImageProvider:
     def validate_response(
         self, response: httpx.Response, request: GenerationRequest
     ) -> GeneratedImage:
-        """Turn one interaction metadata response into validated PNG bytes."""
+        """Turn one interaction metadata response into validated JPEG source bytes."""
         reference = self._image_reference(response)
         if reference.uri is not None:
             self._stage("image_uri_validation")
@@ -662,27 +704,38 @@ class GeminiImageProvider:
         else:
             downloaded = self._decode_inline_image(reference)
             delivery = "inline"
-        if not downloaded.data.startswith(_PNG_MAGIC):
-            raise GenerationProviderError("non_png_response")
+        self._stage("jpeg_validation")
+        try:
+            facts = inspect_image_source(downloaded.data, mime_type=GEMINI_SOURCE_MIME_TYPE)
+        except ImageNormalizationError as exc:
+            raise _normalization_error(exc) from None
         request_id = response.headers.get("x-request-id")
         safe_request_id = (
             request_id if request_id and _SAFE_REQUEST_ID.fullmatch(request_id) else None
         )
         metadata: dict[str, Any] = {
-            "output_format": "png",
             "requested_size": request.size,
             "provider_api": "interactions",
             "provider_api_version": GEMINI_API_VERSION,
             "delivery": delivery,
             "aspect_ratio": GEMINI_IMAGE_ASPECT_RATIO,
             "image_size": GEMINI_IMAGE_SIZE,
+            "provider_source_mime_type": GEMINI_SOURCE_MIME_TYPE,
             "source_sha256": downloaded.sha256,
+            "source_byte_size": facts.byte_size,
+            "source_width": facts.width,
+            "source_height": facts.height,
+            "sealed_mime_type": GEMINI_SEALED_MIME_TYPE,
         }
         display_name = provider_model_display_name(GOOGLE_GEMINI_PROVIDER, request.model)
         if display_name is not None:
             metadata["provider_model_name"] = display_name
         return GeneratedImage(
             data=downloaded.data,
+            source_mime_type=GEMINI_SOURCE_MIME_TYPE,
+            source_extension=GEMINI_SOURCE_EXTENSION,
+            width=facts.width,
+            height=facts.height,
             provider=GOOGLE_GEMINI_PROVIDER,
             model=request.model,
             provider_request_id=safe_request_id,

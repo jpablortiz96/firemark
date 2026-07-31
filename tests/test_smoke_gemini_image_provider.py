@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import socket
 from datetime import UTC, datetime
@@ -16,25 +17,41 @@ from typing import Any
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
+import api.firemark.generate_and_seal as generate_and_seal
+import api.firemark.generation.normalization as normalization
 import scripts.diagnose_gemini_access as diagnose
 import scripts.smoke_gemini_image_provider as smoke
 import scripts.smoke_multimodal_generate_and_seal as multimodal
-from api.firemark.generation.fake_provider import _TINY_PNG
+from api.firemark.control_plane.models import AssetRecord
+from api.firemark.generation.fake_provider import _TINY_JPEG, _TINY_PNG
 from api.firemark.generation.gemini_provider import (
     DOCUMENTED_IMAGE_MIME_TYPES,
     GEMINI_API_BASE_URL,
     GEMINI_API_HOST,
     GEMINI_INTERACTIONS_PATH,
+    GEMINI_REQUEST_MIME_TYPE,
+    GEMINI_SOURCE_MIME_TYPE,
     GeminiImageProvider,
 )
 from api.firemark.generation.models import GeneratedImage, GenerationRequest
+from api.firemark.generation.normalization import (
+    ImageNormalizationError,
+    inspect_image_source,
+    normalize_to_png,
+)
 from api.firemark.generation.provider import (
     SAFE_EXCEPTION_TOKENS,
     GenerationProviderError,
 )
 from api.firemark.generation.provider_identity import provider_model_display_name
+from api.firemark.hashing import sha256_bytes
+from api.firemark.public_capsule import (
+    FiremarkPublicCapsuleV1,
+    embed_public_capsule_png,
+    extract_public_capsule_png,
+)
 from api.firemark.settings import GeminiImageConfig
 
 NOW = datetime(2026, 7, 30, 22, tzinfo=UTC)
@@ -68,7 +85,7 @@ def interaction_body(
     *,
     uri: str | None = IMAGE_URI,
     data: str | None = None,
-    mime_type: str = "image/png",
+    mime_type: str = "image/jpeg",
     status: str = "completed",
     use_steps: bool = False,
     image_blocks: int = 1,
@@ -80,7 +97,7 @@ def interaction_body(
     elif uri is not None:
         image["uri"] = uri
     else:
-        image["data"] = base64.b64encode(_TINY_PNG).decode()
+        image["data"] = base64.b64encode(_TINY_JPEG).decode()
     body: dict[str, object] = {"id": "interaction-1", "object": "interaction", "status": status}
     if use_steps:
         body["steps"] = [
@@ -97,14 +114,14 @@ def interaction_body(
 
 def inline_body(**kwargs: Any) -> dict[str, object]:
     """The defensive inline-Base64 shape used when a provider ignores delivery."""
-    kwargs.setdefault("data", base64.b64encode(_TINY_PNG).decode())
+    kwargs.setdefault("data", base64.b64encode(_TINY_JPEG).decode())
     return interaction_body(uri=None, **kwargs)
 
 
-def png_download(
-    payload: bytes = _TINY_PNG,
+def jpeg_download(
+    payload: bytes = _TINY_JPEG,
     *,
-    content_type: str = "image/png",
+    content_type: str = "image/jpeg",
     content_length: str | None = None,
     status: int = 200,
     location: str | None = None,
@@ -128,7 +145,7 @@ class DownloadRecorder:
     def __call__(self, http_request: httpx.Request) -> httpx.Response:
         self.requests.append(http_request)
         if not self.responses:
-            return png_download()
+            return jpeg_download()
         return self.responses.pop(0)
 
 
@@ -218,7 +235,7 @@ def test_google_ai_studio_key_authenticates_only_with_x_goog_api_key() -> None:
         return httpx.Response(200, json=interaction_body())
 
     result = provider(handler).generate_image(request())
-    assert result.data == _TINY_PNG
+    assert result.data == _TINY_JPEG
     assert len(calls) == 1
 
 
@@ -237,7 +254,7 @@ def test_official_minimal_request_structure_uses_exact_configured_model() -> Non
             "input": [{"type": "text", "text": "private prompt"}],
             "response_format": {
                 "type": "image",
-                "mime_type": "image/png",
+                "mime_type": "image/jpeg",
                 "aspect_ratio": "1:1",
                 "image_size": "1K",
                 "delivery": "uri",
@@ -256,11 +273,13 @@ def test_official_minimal_request_structure_uses_exact_configured_model() -> Non
     assert isinstance(response_format, dict)
     assert response_format["delivery"] == "uri"
     assert response_format["type"] == "image"
-    assert response_format["mime_type"] == "image/png"
+    assert response_format["mime_type"] == GEMINI_REQUEST_MIME_TYPE == "image/jpeg"
     assert response_format["aspect_ratio"] == "1:1"
     assert response_format["image_size"] == "1K"
+    assert "image/png" not in json.dumps(payload)
     assert "contents" not in payload
     assert "generationConfig" not in payload
+    assert ":generateContent" not in json.dumps(payload)
 
 
 def test_model_field_never_carries_a_duplicate_resource_prefix() -> None:
@@ -308,9 +327,11 @@ def test_successful_image_extraction_from_documented_shapes(use_steps: bool) -> 
     result = provider(
         lambda _request: httpx.Response(200, json=interaction_body(use_steps=use_steps))
     ).generate_image(request())
-    assert result.data == _TINY_PNG
-    assert result.media_type == "image/png"
-    assert result.file_extension == "png"
+    assert result.data == _TINY_JPEG
+    assert result.source_mime_type == GEMINI_SOURCE_MIME_TYPE == "image/jpeg"
+    assert result.source_extension == "jpg"
+    assert result.media_type == "image/jpeg"
+    assert result.file_extension == "jpg"
 
 
 def test_generated_image_reports_accurate_provider_identity() -> None:
@@ -318,11 +339,15 @@ def test_generated_image_reports_accurate_provider_identity() -> None:
     assert result.provider == "google_gemini"
     assert result.model == MODEL
     assert result.ai_generated is True
-    assert result.media_type == "image/png"
+    assert result.media_type == "image/jpeg"
     metadata = result.safe_generation_metadata
     assert metadata["provider_model_name"] == "Nano Banana 2"
     assert metadata["provider_api"] == "interactions"
     assert metadata["provider_api_version"] == "v1beta"
+    assert metadata["provider_source_mime_type"] == "image/jpeg"
+    assert metadata["sealed_mime_type"] == "image/png"
+    assert metadata["source_byte_size"] == len(_TINY_JPEG)
+    assert result.width == 2 and result.height == 2
     assert provider_model_display_name("google_gemini", MODEL) == "Nano Banana 2"
 
 
@@ -335,10 +360,10 @@ def test_generated_image_reports_accurate_provider_identity() -> None:
         (interaction_body(use_steps=True, image_blocks=2), "malformed_response"),
         (inline_body(data="%%%"), "malformed_response"),
         (inline_body(data=""), "malformed_response"),
-        (inline_body(mime_type="image/jpeg"), "non_png_response"),
-        (inline_body(mime_type="image/webp"), "non_png_response"),
+        (inline_body(mime_type="image/png"), "unsupported_media_type"),
+        (inline_body(mime_type="image/webp"), "unsupported_media_type"),
         (inline_body(mime_type="application/json"), "malformed_response"),
-        (inline_body(data=base64.b64encode(b"not-png").decode()), "non_png_response"),
+        (inline_body(data=base64.b64encode(b"not-a-jpeg").decode()), "non_jpeg_source"),
         (interaction_body(status="failed"), "malformed_response"),
         (interaction_body(status="in_progress"), "malformed_response"),
         (interaction_body(status="budget_exceeded"), "quota_or_billing"),
@@ -349,7 +374,11 @@ def test_missing_malformed_or_unsupported_images_fail_closed(
 ) -> None:
     with pytest.raises(GenerationProviderError) as caught:
         provider(lambda _request: httpx.Response(200, json=body)).generate_image(request())
-    assert caught.value.code == code
+    if code == "non_jpeg_source":
+        assert caught.value.code == "unsupported_media_type"
+        assert caught.value.safe_reason_code == "NON_JPEG_SOURCE"
+    else:
+        assert caught.value.code == code
 
 
 def test_oversized_inline_response_fails_closed() -> None:
@@ -718,13 +747,13 @@ def test_non_object_body_and_camel_case_image_key_are_handled() -> None:
         "status": "completed",
         "output_image": {
             "type": "image",
-            "mimeType": "image/png",
-            "data": base64.b64encode(_TINY_PNG).decode(),
+            "mimeType": "image/jpeg",
+            "data": base64.b64encode(_TINY_JPEG).decode(),
         },
     }
     assert provider(
         lambda _request: httpx.Response(200, json=camel)
-    ).generate_image(request()).data == _TINY_PNG
+    ).generate_image(request()).data == _TINY_JPEG
 
 
 def test_steps_without_content_are_skipped_and_invalid_content_fails() -> None:
@@ -737,8 +766,8 @@ def test_steps_without_content_are_skipped_and_invalid_content_fails() -> None:
                 "content": [
                     {
                         "type": "image",
-                        "mime_type": "image/png",
-                        "data": base64.b64encode(_TINY_PNG).decode(),
+                        "mime_type": "image/jpeg",
+                        "data": base64.b64encode(_TINY_JPEG).decode(),
                     }
                 ],
             },
@@ -746,7 +775,7 @@ def test_steps_without_content_are_skipped_and_invalid_content_fails() -> None:
     }
     assert provider(
         lambda _request: httpx.Response(200, json=skipped)
-    ).generate_image(request()).data == _TINY_PNG
+    ).generate_image(request()).data == _TINY_JPEG
     invalid = {"status": "completed", "steps": [{"content": "not-a-list"}]}
     with pytest.raises(GenerationProviderError) as caught:
         provider(lambda _request: httpx.Response(200, json=invalid)).generate_image(request())
@@ -851,6 +880,11 @@ def test_preflight_failure_cannot_block_a_valid_generation(tmp_path: Path) -> No
     assert outcome.provider_calls == 1
     assert [stage for stage, _status in outcome.stages] == list(smoke.STAGES)
     assert "model_access_preflight" not in dict(outcome.stages)
+    assert smoke.STAGES[7:9] == ("jpeg_download", "jpeg_validation")
+    assert smoke.STAGES[10:12] == (
+        "deterministic_png_normalization",
+        "normalized_png_validation",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -872,7 +906,11 @@ class CountingProvider:
 
 def generated_image() -> GeneratedImage:
     return GeneratedImage(
-        data=_TINY_PNG,
+        data=_TINY_JPEG,
+        source_mime_type="image/jpeg",
+        source_extension="jpg",
+        width=2,
+        height=2,
         provider="google_gemini",
         model=MODEL,
         provider_created_at=NOW,
@@ -907,11 +945,15 @@ def test_exactly_one_generation_call_and_state_is_persisted(tmp_path: Path) -> N
     assert stored.operation_state == "complete"
     assert stored.new_provider_calls == 1
     assert stored.provider == "google_gemini"
+    assert stored.source_mime_type == "image/jpeg"
+    assert stored.source_extension == "jpg"
     assert stored.source_sha256 == outcome.source_sha256
-    assert Path(str(stored.source_path)).read_bytes() == _TINY_PNG
+    assert stored.source_sha256 != stored.normalized_sha256
+    assert Path(str(stored.source_path)).read_bytes() == _TINY_JPEG
+    assert Path(str(stored.source_path)).name == "source.jpg"
 
 
-def test_recovery_reuses_persisted_png_and_never_calls_gemini_again(tmp_path: Path) -> None:
+def test_recovery_reuses_persisted_source_and_never_calls_gemini_again(tmp_path: Path) -> None:
     first = CountingProvider(generated_image())
     assert run_smoke(tmp_path, first).category == "OK"
 
@@ -1114,9 +1156,9 @@ def test_gemini_smoke_contacts_no_other_provider(monkeypatch: pytest.MonkeyPatch
 
 
 def test_uri_delivery_is_the_default_and_downloads_through_a_separate_client() -> None:
-    recorder = DownloadRecorder(png_download())
+    recorder = DownloadRecorder(jpeg_download())
     image = ok_provider(download=recorder).generate_image(request())
-    assert image.data == _TINY_PNG
+    assert image.data == _TINY_JPEG
     assert image.safe_generation_metadata["delivery"] == "uri"
     assert image.safe_generation_metadata["aspect_ratio"] == "1:1"
     assert image.safe_generation_metadata["image_size"] == "1K"
@@ -1126,18 +1168,18 @@ def test_uri_delivery_is_the_default_and_downloads_through_a_separate_client() -
 
 
 def test_source_sha256_is_calculated_during_the_download() -> None:
-    recorder = DownloadRecorder(png_download())
+    recorder = DownloadRecorder(jpeg_download())
     image = ok_provider(download=recorder).generate_image(request())
-    assert image.safe_generation_metadata["source_sha256"] == hashlib.sha256(_TINY_PNG).hexdigest()
+    assert image.safe_generation_metadata["source_sha256"] == hashlib.sha256(_TINY_JPEG).hexdigest()
 
 
 def test_step_content_image_uri_is_parsed() -> None:
-    recorder = DownloadRecorder(png_download())
+    recorder = DownloadRecorder(jpeg_download())
     image = provider(
         lambda _request: httpx.Response(200, json=interaction_body(use_steps=True)),
         download=recorder,
     ).generate_image(request())
-    assert image.data == _TINY_PNG
+    assert image.data == _TINY_JPEG
     assert len(recorder.requests) == 1
 
 
@@ -1146,20 +1188,20 @@ def test_inline_delivery_remains_a_defensive_fallback() -> None:
     image = provider(
         lambda _request: httpx.Response(200, json=inline_body()), download=recorder
     ).generate_image(request())
-    assert image.data == _TINY_PNG
+    assert image.data == _TINY_JPEG
     assert image.safe_generation_metadata["delivery"] == "inline"
     assert recorder.requests == []
 
 
 def test_api_key_is_sent_only_to_the_gemini_api_host() -> None:
-    gemini_host = DownloadRecorder(png_download())
+    gemini_host = DownloadRecorder(jpeg_download())
     provider(
         lambda _request: httpx.Response(200, json=interaction_body(uri=IMAGE_URI)),
         download=gemini_host,
     ).generate_image(request())
     assert gemini_host.requests[0].headers["x-goog-api-key"] == "test-gemini-secret"
 
-    signed_host = DownloadRecorder(png_download())
+    signed_host = DownloadRecorder(jpeg_download())
     provider(
         lambda _request: httpx.Response(200, json=interaction_body(uri=SIGNED_URI)),
         download=signed_host,
@@ -1223,11 +1265,11 @@ def test_unsafe_image_uris_are_rejected_without_downloading(uri: str, reason: st
     ],
 )
 def test_google_hosted_uris_are_accepted(uri: str) -> None:
-    recorder = DownloadRecorder(png_download())
+    recorder = DownloadRecorder(jpeg_download())
     image = provider(
         lambda _request: httpx.Response(200, json=interaction_body(uri=uri)), download=recorder
     ).generate_image(request())
-    assert image.data == _TINY_PNG
+    assert image.data == _TINY_JPEG
     assert str(recorder.requests[0].url) == uri
 
 
@@ -1240,19 +1282,19 @@ def test_missing_uri_and_missing_data_fails_closed() -> None:
 
 def test_second_redirect_is_rejected_and_first_is_validated() -> None:
     single = DownloadRecorder(
-        png_download(status=302, location=SIGNED_URI), png_download()
+        jpeg_download(status=302, location=SIGNED_URI), jpeg_download()
     )
     image = provider(
         lambda _request: httpx.Response(200, json=interaction_body()), download=single
     ).generate_image(request())
-    assert image.data == _TINY_PNG
+    assert image.data == _TINY_JPEG
     assert [str(call.url) for call in single.requests] == [IMAGE_URI, SIGNED_URI]
     assert "x-goog-api-key" in single.requests[0].headers
     assert "x-goog-api-key" not in single.requests[1].headers
 
     chained = DownloadRecorder(
-        png_download(status=302, location=SIGNED_URI),
-        png_download(status=302, location=SIGNED_URI),
+        jpeg_download(status=302, location=SIGNED_URI),
+        jpeg_download(status=302, location=SIGNED_URI),
     )
     with pytest.raises(GenerationProviderError) as caught:
         provider(
@@ -1262,7 +1304,7 @@ def test_second_redirect_is_rejected_and_first_is_validated() -> None:
 
 
 def test_redirect_to_an_unsafe_destination_is_rejected() -> None:
-    hostile = DownloadRecorder(png_download(status=302, location="https://127.0.0.1/image.png"))
+    hostile = DownloadRecorder(jpeg_download(status=302, location="https://127.0.0.1/image.png"))
     with pytest.raises(GenerationProviderError) as caught:
         provider(
             lambda _request: httpx.Response(200, json=interaction_body()), download=hostile
@@ -1271,7 +1313,7 @@ def test_redirect_to_an_unsafe_destination_is_rejected() -> None:
 
 
 def test_redirect_without_a_location_is_rejected() -> None:
-    headerless = DownloadRecorder(png_download(status=302))
+    headerless = DownloadRecorder(jpeg_download(status=302))
     with pytest.raises(GenerationProviderError) as caught:
         provider(
             lambda _request: httpx.Response(200, json=interaction_body()), download=headerless
@@ -1282,22 +1324,31 @@ def test_redirect_without_a_location_is_rejected() -> None:
 @pytest.mark.parametrize(
     ("response", "code", "reason"),
     [
-        (png_download(content_type="image/jpeg"), "non_png_response", None),
-        (png_download(content_type="image/webp"), "non_png_response", None),
-        (png_download(content_type="text/html"), "malformed_response", "IMAGE_CONTENT_TYPE_REJECTED"),
         (
-            png_download(content_type="application/json"),
+            jpeg_download(content_type="image/png"),
+            "unsupported_media_type",
+            "PROVIDER_SOURCE_MIME_UNSUPPORTED",
+        ),
+        (
+            jpeg_download(content_type="image/webp"),
+            "unsupported_media_type",
+            "PROVIDER_SOURCE_MIME_UNSUPPORTED",
+        ),
+        (jpeg_download(content_type="text/html"), "malformed_response", "IMAGE_CONTENT_TYPE_REJECTED"),
+        (
+            jpeg_download(content_type="application/json"),
             "malformed_response",
             "IMAGE_CONTENT_TYPE_REJECTED",
         ),
-        (png_download(b"not-a-png-at-all"), "non_png_response", None),
+        (jpeg_download(b"not-a-jpeg-at-all"), "unsupported_media_type", "NON_JPEG_SOURCE"),
+        (jpeg_download(_TINY_JPEG[:40]), "malformed_response", "MALFORMED_IMAGE"),
         (
-            png_download(content_length="9999"),
+            jpeg_download(content_length="9999"),
             "malformed_response",
             "IMAGE_DOWNLOAD_TRUNCATED",
         ),
         (
-            png_download(content_length="invalid"),
+            jpeg_download(content_length="invalid"),
             "malformed_response",
             "IMAGE_CONTENT_LENGTH_INVALID",
         ),
@@ -1314,7 +1365,7 @@ def test_download_responses_are_validated(
 
 
 def test_download_is_bounded_by_declared_and_streamed_size() -> None:
-    declared = png_download(content_length=str(64 * 1024 * 1024))
+    declared = jpeg_download(content_length=str(64 * 1024 * 1024))
     with pytest.raises(GenerationProviderError) as by_header:
         ok_provider(download=DownloadRecorder(declared), max_image_bytes=1024).generate_image(
             request()
@@ -1327,7 +1378,7 @@ def test_download_is_bounded_by_declared_and_streamed_size() -> None:
                 yield b"x" * 4096
 
     streamed = httpx.Response(
-        200, headers={"content-type": "image/png"}, stream=LargeStream()
+        200, headers={"content-type": "image/jpeg"}, stream=LargeStream()
     )
     with pytest.raises(GenerationProviderError) as by_stream:
         ok_provider(download=DownloadRecorder(streamed), max_image_bytes=1024).generate_image(
@@ -1362,7 +1413,7 @@ def test_uri_is_absent_from_checkpoint_output_and_metadata(
     def factory(**kwargs: Any) -> GeminiImageProvider:
         return provider(
             lambda _request: httpx.Response(200, json=interaction_body(uri=secret_uri)),
-            download=DownloadRecorder(png_download()),
+            download=DownloadRecorder(jpeg_download()),
             stage_callback=kwargs.get("stage_callback"),
         )
 
@@ -1624,7 +1675,7 @@ def test_blank_and_hostless_uris_are_rejected() -> None:
 
 
 def test_download_bound_is_enforced_before_the_body_is_read() -> None:
-    oversized = png_download(content_length=str(4096))
+    oversized = jpeg_download(content_length=str(4096))
     with pytest.raises(GenerationProviderError) as caught:
         ok_provider(
             download=DownloadRecorder(oversized), max_image_bytes=1024
@@ -1640,5 +1691,484 @@ def test_provider_reported_stages_are_part_of_the_declared_stage_table() -> None
         "interaction_submission",
         "interaction_metadata_validation",
         "image_uri_validation",
-        "image_download",
+        "jpeg_download",
+        "jpeg_validation",
     ]
+
+
+# --------------------------------------------------------------------------
+# Deterministic JPEG to PNG normalization
+# --------------------------------------------------------------------------
+
+
+def build_jpeg(
+    size: tuple[int, int] = (8, 8), *, exif_orientation: int | None = None, quality: int = 90
+) -> bytes:
+    from PIL import Image
+
+    image = Image.new("RGB", size, (180, 60, 30))
+    image.putpixel((0, 0), (12, 200, 90))
+    buffer = io.BytesIO()
+    save_kwargs: dict[str, Any] = {"format": "JPEG", "quality": quality}
+    if exif_orientation is not None:
+        exif = Image.Exif()
+        exif[0x0112] = exif_orientation
+        exif[0x010E] = "private provider comment"
+        save_kwargs["exif"] = exif.tobytes()
+    image.save(buffer, **save_kwargs)
+    return buffer.getvalue()
+
+
+def test_normalization_produces_a_valid_deterministic_png() -> None:
+    source = build_jpeg()
+    first = normalize_to_png(source, source_mime_type="image/jpeg")
+    second = normalize_to_png(source, source_mime_type="image/jpeg")
+    assert first.data == second.data
+    assert first.data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert first.mime_type == "image/png"
+    assert first.file_extension == "png"
+    assert (first.width, first.height) == (8, 8)
+    assert first.data != source
+
+
+def test_normalization_strips_exif_comments_and_icc_profile() -> None:
+    from PIL import Image
+
+    source = build_jpeg(exif_orientation=1)
+    assert b"private provider comment" in source
+    normalized = normalize_to_png(source, source_mime_type="image/jpeg")
+    assert b"private provider comment" not in normalized.data
+    assert b"eXIf" not in normalized.data
+    assert b"iCCP" not in normalized.data
+    assert b"tEXt" not in normalized.data
+    with Image.open(io.BytesIO(normalized.data)) as decoded:
+        assert decoded.info == {}
+        assert decoded.getexif() == Image.Exif()
+
+
+def test_normalization_applies_orientation_deterministically() -> None:
+    from PIL import Image
+
+    rotated = build_jpeg(size=(8, 4), exif_orientation=6)
+    normalized = normalize_to_png(rotated, source_mime_type="image/jpeg")
+    # Orientation 6 rotates the frame, so the normalized carrier is portrait.
+    assert (normalized.width, normalized.height) == (4, 8)
+    with Image.open(io.BytesIO(normalized.data)) as decoded:
+        assert decoded.size == (4, 8)
+
+
+def test_normalization_converts_to_rgb_and_keeps_alpha_only_when_real() -> None:
+    from PIL import Image
+
+    opaque = normalize_to_png(build_jpeg(), source_mime_type="image/jpeg")
+    with Image.open(io.BytesIO(opaque.data)) as decoded:
+        assert decoded.mode == "RGB"
+
+    buffer = io.BytesIO()
+    transparent = Image.new("RGBA", (4, 4), (10, 20, 30, 128))
+    transparent.save(buffer, format="PNG")
+    kept = normalize_to_png(buffer.getvalue(), source_mime_type="image/png")
+    with Image.open(io.BytesIO(kept.data)) as decoded:
+        assert decoded.mode == "RGBA"
+
+    buffer = io.BytesIO()
+    Image.new("RGBA", (4, 4), (10, 20, 30, 255)).save(buffer, format="PNG")
+    flattened = normalize_to_png(buffer.getvalue(), source_mime_type="image/png")
+    with Image.open(io.BytesIO(flattened.data)) as decoded:
+        assert decoded.mode == "RGB"
+
+
+@pytest.mark.parametrize(
+    ("payload", "mime_type", "code"),
+    [
+        (b"not-an-image", "image/jpeg", "non_jpeg_source"),
+        (_TINY_PNG, "image/jpeg", "non_jpeg_source"),
+        (_TINY_JPEG, "image/webp", "unsupported_source_mime"),
+        (_TINY_JPEG[:20], "image/jpeg", "malformed_image"),
+    ],
+)
+def test_normalization_rejects_unusable_sources(
+    payload: bytes, mime_type: str, code: str
+) -> None:
+    with pytest.raises(ImageNormalizationError) as caught:
+        normalize_to_png(payload, source_mime_type=mime_type)
+    assert caught.value.code == code
+    with pytest.raises(ImageNormalizationError) as inspected:
+        inspect_image_source(payload, mime_type=mime_type)
+    assert inspected.value.code == code
+
+
+def test_truncated_jpeg_fails_structural_inspection_and_decoding() -> None:
+    truncated = _TINY_JPEG[:-30]
+    with pytest.raises(ImageNormalizationError) as inspected:
+        inspect_image_source(truncated, mime_type="image/jpeg")
+    assert inspected.value.code == "malformed_image"
+    with pytest.raises(ImageNormalizationError) as decoded:
+        normalize_to_png(truncated, source_mime_type="image/jpeg")
+    assert decoded.value.code == "image_decoding_failure"
+
+
+def test_normalization_rejects_excessive_dimensions_and_pixel_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = build_jpeg(size=(64, 64))
+    monkeypatch.setattr(normalization, "MAX_IMAGE_DIMENSION", 32)
+    with pytest.raises(ImageNormalizationError) as dimensions:
+        normalize_to_png(source, source_mime_type="image/jpeg")
+    assert dimensions.value.code == "image_dimensions_exceeded"
+
+    monkeypatch.setattr(normalization, "MAX_IMAGE_DIMENSION", 16384)
+    monkeypatch.setattr(normalization, "MAX_IMAGE_PIXELS", 1024)
+    with pytest.raises(ImageNormalizationError) as pixels:
+        normalize_to_png(source, source_mime_type="image/jpeg")
+    assert pixels.value.code == "image_pixels_exceeded"
+
+
+def test_normalization_rejects_a_decompression_bomb(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image
+
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
+    with pytest.raises(ImageNormalizationError) as caught:
+        normalize_to_png(build_jpeg(size=(64, 64)), source_mime_type="image/jpeg")
+    assert caught.value.code == "image_pixels_exceeded"
+
+
+def test_normalization_failure_is_reported_safely(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image
+
+    source = build_jpeg()
+
+    def refuse(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise OSError("private encoder detail")
+
+    monkeypatch.setattr(Image.Image, "save", refuse)
+    with pytest.raises(ImageNormalizationError) as caught:
+        normalize_to_png(source, source_mime_type="image/jpeg")
+    assert caught.value.code == "png_normalization_failure"
+    assert "private encoder detail" not in str(caught.value)
+
+
+def test_source_facts_describe_the_untouched_bytes() -> None:
+    source = build_jpeg(size=(6, 3))
+    facts = inspect_image_source(source, mime_type="image/jpeg")
+    assert facts.mime_type == "image/jpeg"
+    assert (facts.width, facts.height) == (6, 3)
+    assert facts.byte_size == len(source)
+
+
+# --------------------------------------------------------------------------
+# Source versus sealed contract through Generate & Seal
+# --------------------------------------------------------------------------
+
+
+def seal_image(image: GeneratedImage) -> dict[str, Any]:
+    """Run the source-to-sealed portion of Generate & Seal without any network."""
+    source_sha256 = sha256_bytes(image.data)
+    carrier = generate_and_seal._png_carrier(image, stage_callback=lambda _stage: None)
+    manifest = generate_and_seal._build_manifest(
+        image,
+        "private prompt",
+        {"requested_size": "1024x1024"},
+        run_id="firemark-run-jpeg-contract",
+        source_sha256=source_sha256,
+        normalization=carrier.record,
+    )
+    capsule = FiremarkPublicCapsuleV1.model_validate(
+        {
+            "cert_id": "firemark-cert-jpeg",
+            "asset_id": "firemark-asset-jpeg",
+            "run_id": "firemark-run-jpeg-contract",
+            "canonical_hash": manifest.canonical_hash,
+            "source_sha256": source_sha256,
+            "signer_key_id": "firemark-signer-1",
+            "verify_url": "https://verify.firemark.test/v1/certificates/firemark-cert-jpeg",
+            "issued_at": NOW,
+        }
+    )
+    sealed = embed_public_capsule_png(carrier.data, capsule)
+    return {
+        "source_sha256": source_sha256,
+        "sealed_sha256": sha256_bytes(sealed),
+        "sealed": sealed,
+        "carrier": carrier,
+        "manifest": manifest,
+        "capsule": capsule,
+    }
+
+
+def gemini_source_image() -> GeneratedImage:
+    source = build_jpeg(size=(10, 10))
+    return GeneratedImage(
+        data=source,
+        source_mime_type="image/jpeg",
+        source_extension="jpg",
+        width=10,
+        height=10,
+        provider="google_gemini",
+        model=MODEL,
+        provider_created_at=NOW,
+        safe_generation_metadata={
+            "provider_source_mime_type": "image/jpeg",
+            "provider_model_name": "Nano Banana 2",
+        },
+        ai_generated=True,
+    )
+
+
+def test_source_hash_is_the_exact_jpeg_and_sealed_hash_is_the_png() -> None:
+    image = gemini_source_image()
+    result = seal_image(image)
+    assert result["source_sha256"] == hashlib.sha256(image.data).hexdigest()
+    assert result["source_sha256"] != result["sealed_sha256"]
+    assert result["sealed"].startswith(b"\x89PNG\r\n\x1a\n")
+    assert not image.data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert result["sealed_sha256"] != hashlib.sha256(result["carrier"].data).hexdigest()
+
+
+def test_sealed_png_carries_the_public_capsule() -> None:
+    result = seal_image(gemini_source_image())
+    extracted = extract_public_capsule_png(result["sealed"])
+    assert extracted.model_dump(mode="json") == result["capsule"].model_dump(mode="json")
+    assert extracted.source_sha256 == result["source_sha256"]
+
+
+def test_private_provenance_records_the_normalization_step() -> None:
+    result = seal_image(gemini_source_image())
+    step = result["manifest"].run.steps[0]
+    record = dict(step.metadata)["firemark_normalization"]
+    assert record == {
+        "operation": "normalize_image",
+        "input_mime_type": "image/jpeg",
+        "output_mime_type": "image/png",
+        "purpose": "firemark_public_capsule_embedding",
+    }
+    assert dict(step.metadata)["provider_source_mime_type"] == "image/jpeg"
+    assert step.assets[0].sha256 == result["source_sha256"]
+
+
+def test_a_png_source_is_carried_through_without_re_encoding() -> None:
+    image = GeneratedImage(
+        data=_TINY_PNG,
+        source_mime_type="image/png",
+        source_extension="png",
+        provider="openai",
+        model="gpt-image-1.5",
+        provider_created_at=NOW,
+        ai_generated=True,
+    )
+    carrier = generate_and_seal._png_carrier(image, stage_callback=lambda _stage: None)
+    assert carrier.data == _TINY_PNG
+    assert carrier.record is None
+
+
+def test_public_certificate_represents_the_sealed_png_not_the_jpeg_source() -> None:
+    result = seal_image(gemini_source_image())
+    asset = AssetRecord(
+        asset_id="firemark-asset-jpeg",
+        run_id="firemark-run-jpeg-contract",
+        asset_type="image",
+        media_type=generate_and_seal.SEALED_IMAGE_MIME_TYPE,
+        file_extension=generate_and_seal.SEALED_IMAGE_EXTENSION,
+        byte_size=len(result["sealed"]),
+        width=10,
+        height=10,
+        source_sha256=result["source_sha256"],
+        sealed_sha256=result["sealed_sha256"],
+        assets_bucket="firemark-assets",
+        assets_key="assets/ab/cd/sealed.png",
+        assets_version_id="version-1",
+        vault_bucket="firemark-vault",
+        vault_key="vault/sources/ab/cd/source.jpg",
+        vault_version_id="version-2",
+        created_at=NOW,
+    )
+    assert asset.media_type == "image/png"
+    assert asset.file_extension == "png"
+    assert asset.vault_key.endswith(".jpg")
+    assert asset.source_sha256 != asset.sealed_sha256
+
+
+def test_generated_image_never_labels_jpeg_bytes_as_png() -> None:
+    with pytest.raises(ValidationError):
+        GeneratedImage(
+            data=build_jpeg(),
+            source_mime_type="image/png",
+            source_extension="png",
+            provider="google_gemini",
+            model=MODEL,
+            provider_created_at=NOW,
+            ai_generated=True,
+        )
+    with pytest.raises(ValidationError):
+        GeneratedImage(
+            data=build_jpeg(),
+            source_mime_type="image/jpeg",
+            source_extension="png",
+            provider="google_gemini",
+            model=MODEL,
+            provider_created_at=NOW,
+            ai_generated=True,
+        )
+
+
+def test_definitive_rejection_is_the_only_authorized_path_after_http_400(
+    tmp_path: Path,
+) -> None:
+    """The live HTTP 400 checkpoint stays retryable only through explicit authorization."""
+    store = smoke.CheckpointStore(tmp_path / "checkpoint.json", tmp_path / "private")
+    store.write(
+        smoke.GeminiProviderCheckpoint(
+            operation_state="provider_rejected",
+            operation_id="firemark-gemini-op-b4295a0602be4ee2ac74fb9cc90af51b",
+            model=MODEL,
+            request_id=smoke.SMOKE_REQUEST_ID,
+            created_at=NOW,
+            new_provider_calls=1,
+            prior_rejected_calls=1,
+            provider_failure_code="invalid_request",
+            provider_failure_status=400,
+            provider_safe_reason_code="HTTP_400",
+            provider_retry_allowed=True,
+        )
+    )
+    original = store.path.read_bytes()
+    assert smoke.classify_prior_checkpoint(store, config()) == "definitive_rejection"
+
+    blocked = CountingProvider(generated_image())
+    assert run_smoke(tmp_path, blocked).category == "DEFINITIVE_REJECTION_NOT_AUTHORIZED"
+    assert blocked.calls == 0
+    assert store.path.read_bytes() == original
+
+    refused = CountingProvider(generated_image())
+    assert (
+        run_smoke(tmp_path, refused, start_new_operation_after_ambiguous=True).category
+        == "NO_AMBIGUOUS_CHECKPOINT"
+    )
+    assert refused.calls == 0
+    assert store.path.read_bytes() == original
+    assert not (tmp_path / "archive").exists()
+
+    authorized = CountingProvider(generated_image())
+    outcome = run_smoke(tmp_path, authorized, allow_definitive_retry=True)
+    assert outcome.category == "OK"
+    assert authorized.calls == 1
+    assert outcome.source_mime_type == "image/jpeg"
+
+
+def test_format_mismatch_between_magic_and_container_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A payload whose magic and decoded container disagree is never accepted."""
+    from PIL import Image
+
+    real_open = Image.open
+
+    def wrong_format(*args: Any, **kwargs: Any) -> Any:
+        image = real_open(*args, **kwargs)
+        image.format = "GIF"
+        return image
+
+    monkeypatch.setattr(Image, "open", wrong_format)
+    for mime_type, code in (("image/jpeg", "non_jpeg_source"), ("image/png", "malformed_image")):
+        payload = build_jpeg() if mime_type == "image/jpeg" else _TINY_PNG
+        with pytest.raises(ImageNormalizationError) as caught:
+            inspect_image_source(payload, mime_type=mime_type)
+        assert caught.value.code == code
+
+
+def test_zero_dimension_images_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image
+
+    real_open = Image.open
+
+    def empty(*args: Any, **kwargs: Any) -> Any:
+        image = real_open(*args, **kwargs)
+        monkeypatch.setattr(type(image), "size", (0, 0), raising=False)
+        return image
+
+    monkeypatch.setattr(Image, "open", empty)
+    with pytest.raises(ImageNormalizationError) as caught:
+        inspect_image_source(build_jpeg(), mime_type="image/jpeg")
+    assert caught.value.code == "malformed_image"
+
+
+def test_decompression_bomb_during_load_and_transpose_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PIL import Image, ImageOps
+
+    source = build_jpeg()
+
+    def bomb(*args: Any, **kwargs: Any) -> Any:
+        raise Image.DecompressionBombError("private bomb detail")
+
+    monkeypatch.setattr(Image.Image, "load", bomb)
+    with pytest.raises(ImageNormalizationError) as loading:
+        inspect_image_source(source, mime_type="image/jpeg")
+    assert loading.value.code == "image_pixels_exceeded"
+
+    monkeypatch.undo()
+    monkeypatch.setattr(ImageOps, "exif_transpose", bomb)
+    with pytest.raises(ImageNormalizationError) as transposing:
+        normalize_to_png(source, source_mime_type="image/jpeg")
+    assert transposing.value.code == "image_pixels_exceeded"
+    assert "private bomb detail" not in str(transposing.value)
+
+
+def test_transparency_marker_alone_reports_real_alpha() -> None:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    palette = Image.new("P", (4, 4))
+    palette.info["transparency"] = 0
+    palette.save(buffer, format="PNG", transparency=0)
+    normalized = normalize_to_png(buffer.getvalue(), source_mime_type="image/png")
+    with Image.open(io.BytesIO(normalized.data)) as decoded:
+        assert decoded.mode == "RGBA"
+
+
+def test_non_png_encoder_output_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image
+
+    source = build_jpeg()
+
+    def write_garbage(self: Any, fp: Any, *args: Any, **kwargs: Any) -> None:
+        fp.write(b"GIF89a-not-a-png")
+
+    monkeypatch.setattr(Image.Image, "save", write_garbage)
+    with pytest.raises(ImageNormalizationError) as caught:
+        normalize_to_png(source, source_mime_type="image/jpeg")
+    assert caught.value.code == "non_png_normalized_output"
+
+
+def test_source_bytes_property_exposes_the_untouched_provider_payload() -> None:
+    image = gemini_source_image()
+    assert image.source_bytes is image.data
+    assert image.source_bytes.startswith(b"\xff\xd8\xff")
+
+
+def test_generate_and_seal_reports_normalization_failures_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = gemini_source_image()
+
+    def refuse(_data: bytes, *, source_mime_type: str) -> None:
+        raise ImageNormalizationError("image_decoding_failure")
+
+    monkeypatch.setattr(generate_and_seal, "normalize_to_png", refuse)
+    with pytest.raises(generate_and_seal.GenerateAndSealError) as caught:
+        generate_and_seal._png_carrier(image, stage_callback=lambda _stage: None)
+    assert caught.value.code == "IMAGE_NORMALIZATION_IMAGE_DECODING_FAILURE"
+
+
+def test_generate_and_seal_rejects_a_non_png_normalized_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = gemini_source_image()
+    fake = normalization.NormalizedImage(data=b"GIF89a", width=1, height=1)
+    monkeypatch.setattr(
+        generate_and_seal, "normalize_to_png", lambda _data, *, source_mime_type: fake
+    )
+    with pytest.raises(generate_and_seal.GenerateAndSealError) as caught:
+        generate_and_seal._png_carrier(image, stage_callback=lambda _stage: None)
+    assert caught.value.code == "IMAGE_NORMALIZATION_NON_PNG_NORMALIZED_OUTPUT"

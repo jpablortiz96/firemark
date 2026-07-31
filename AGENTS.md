@@ -55,7 +55,7 @@ Generation uses the official **Interactions API**:
 POST https://generativelanguage.googleapis.com/v1beta/interactions
 {"model": "<GEMINI_IMAGE_MODEL>",
  "input": [{"type": "text", "text": "<prompt>"}],
- "response_format": {"type": "image", "mime_type": "image/png",
+ "response_format": {"type": "image", "mime_type": "image/jpeg",
                      "aspect_ratio": "1:1", "image_size": "1K",
                      "delivery": "uri"},
  "stream": false, "background": false, "store": false}
@@ -63,6 +63,39 @@ POST https://generativelanguage.googleapis.com/v1beta/interactions
 
 Keys are snake_case; this is the Interactions REST schema, not `generateContent`. Never send
 `Authorization: Bearer`. Never prefix the model with `models/`. Never add undocumented fields.
+
+**`ImageResponseFormat.mime_type` must be `image/jpeg`.** `image/png` is not a valid value for the
+URI delivery contract and is rejected with HTTP 400 `INVALID_REQUEST`. FIREMARK requests the
+accurate JPEG source and builds the PNG carrier itself.
+
+### Source versus sealed media
+
+They are different artifacts. Never conflate them:
+
+| | Source | Sealed |
+| --- | --- | --- |
+| Format | `image/jpeg` (exact provider bytes) | `image/png` |
+| Hash | `source_sha256` | `sealed_sha256` |
+| Storage | assets + COMPLIANCE vault, `.jpg` | content-addressed assets key, `.png` |
+
+`source_sha256` is the SHA-256 of the untouched provider bytes and is **never** computed from the
+normalized PNG. `GeneratedImage` carries `source_mime_type`, `source_extension`, `width` and
+`height`; it does not assume PNG. `provider_source_mime_type` lives in private generation metadata,
+so a JPEG source needs no migration.
+
+### Deterministic PNG normalization
+
+`api/firemark/generation/normalization.py` is the only place a source format is converted. It is
+offline, uses pinned Pillow, and must stay deterministic: fixed PNG options, EXIF orientation
+applied, pixel buffer copied into a fresh image so no EXIF/comment/ICC/provider metadata survives,
+alpha kept only when genuinely present, and bounds on dimensions (16384 px) and pixels (50 MP).
+Malformed images and decompression bombs fail closed. The only lossy step is decoding the provider's
+JPEG — never add another.
+
+A PNG source is carried through untouched so existing evidence stays byte identical. The private
+manifest records `{"operation": "normalize_image", "input_mime_type": ..., "output_mime_type":
+"image/png", "purpose": "firemark_public_capsule_embedding"}` on the generation step, and it stays
+private.
 
 ### URI delivery
 
@@ -84,8 +117,9 @@ and a Google-hosted allowlisted host; reject localhost, loopback, private, link-
 multicast addresses. Reject redirects by default; follow at most one, and only after revalidating
 the destination. Present the API key only to `generativelanguage.googleapis.com`.
 
-A JPEG or WebP response is reported as `NON_PNG_RESPONSE`. Never relabel bytes; add no implicit
-lossy conversion.
+A download whose content type is not the requested `image/jpeg` is rejected with
+`PROVIDER_SOURCE_MIME_UNSUPPORTED` before its body is read. Never relabel bytes FIREMARK did not
+request.
 
 Certificate identity for the current image model must be exactly:
 

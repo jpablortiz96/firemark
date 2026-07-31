@@ -31,15 +31,19 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from api.firemark.generate_and_seal import SEALED_IMAGE_MIME_TYPE
 from api.firemark.generation.gemini_provider import (
     GEMINI_IMAGE_ASPECT_RATIO,
     GEMINI_IMAGE_DELIVERY,
     GEMINI_IMAGE_SIZE,
     GEMINI_INTERACTIONS_PATH,
-    GEMINI_OUTPUT_MIME_TYPE,
+    GEMINI_REQUEST_MIME_TYPE,
+    GEMINI_SOURCE_EXTENSION,
+    GEMINI_SOURCE_MIME_TYPE,
     GeminiImageProvider,
 )
-from api.firemark.generation.models import GeneratedImage, GenerationRequest
+from api.firemark.generation.models import PNG_MAGIC, GeneratedImage, GenerationRequest
+from api.firemark.generation.normalization import ImageNormalizationError, normalize_to_png
 from api.firemark.generation.provider import GenerationProviderError
 from api.firemark.generation.provider_identity import (
     GOOGLE_GEMINI_PROVIDER,
@@ -62,14 +66,15 @@ STAGES = (
     "configuration_validation",
     "request_construction",
     "prior_checkpoint_classification",
-    "ambiguous_checkpoint_archival",
     "checkpoint_before_submission",
     "interaction_submission",
     "interaction_metadata_validation",
     "image_uri_validation",
-    "image_download",
-    "png_validation",
+    "jpeg_download",
+    "jpeg_validation",
     "source_hash",
+    "deterministic_png_normalization",
+    "normalized_png_validation",
     "checkpoint_completion",
 )
 #: Stages the provider reports through its stage callback.
@@ -78,9 +83,13 @@ PROVIDER_STAGES = frozenset(
         "interaction_submission",
         "interaction_metadata_validation",
         "image_uri_validation",
-        "image_download",
+        "jpeg_download",
+        "jpeg_validation",
     }
 )
+#: An ambiguous checkpoint is archived before the stage table starts, so the
+#: archival step is reported separately from the twelve in-run stages.
+ARCHIVAL_STAGE = "ambiguous_checkpoint_archival"
 
 SafeCategory = Literal[
     "OK",
@@ -97,11 +106,31 @@ SafeCategory = Literal[
     "MALFORMED_RESPONSE",
     "NON_PNG_RESPONSE",
     "RESPONSE_TOO_LARGE",
+    "UNSUPPORTED_SOURCE_MIME",
+    "NON_JPEG_SOURCE",
+    "MALFORMED_IMAGE",
+    "IMAGE_DIMENSIONS_EXCEEDED",
+    "IMAGE_PIXELS_EXCEEDED",
+    "IMAGE_DECODING_FAILURE",
+    "PNG_NORMALIZATION_FAILURE",
+    "NON_PNG_NORMALIZED_OUTPUT",
     "AMBIGUOUS_PRIOR_SUBMISSION",
     "DEFINITIVE_REJECTION_NOT_AUTHORIZED",
     "NO_AMBIGUOUS_CHECKPOINT",
     "SAFE_UNEXPECTED_FAILURE",
 ]
+
+#: Normalization failures reported with their exact structural cause.
+NORMALIZATION_CATEGORIES: dict[str, SafeCategory] = {
+    "unsupported_source_mime": "UNSUPPORTED_SOURCE_MIME",
+    "non_jpeg_source": "NON_JPEG_SOURCE",
+    "malformed_image": "MALFORMED_IMAGE",
+    "image_dimensions_exceeded": "IMAGE_DIMENSIONS_EXCEEDED",
+    "image_pixels_exceeded": "IMAGE_PIXELS_EXCEEDED",
+    "image_decoding_failure": "IMAGE_DECODING_FAILURE",
+    "png_normalization_failure": "PNG_NORMALIZATION_FAILURE",
+    "non_png_normalized_output": "NON_PNG_NORMALIZED_OUTPUT",
+}
 
 PROVIDER_CATEGORIES: dict[str, SafeCategory] = {
     "authentication": "AUTHENTICATION_FAILURE",
@@ -177,7 +206,14 @@ class GeminiProviderCheckpoint(BaseModel):
     provider: Literal["google_gemini"] = GOOGLE_GEMINI_PROVIDER
     model: str
     media_type: Literal["image"] = "image"
+    #: The distributable sealed carrier FIREMARK produces.
     mime_type: Literal["image/png"] = "image/png"
+    #: The exact format the provider delivered. It is never relabelled.
+    source_mime_type: str | None = None
+    source_extension: str | None = None
+    source_byte_size: int | None = Field(default=None, gt=0)
+    normalized_sha256: str | None = None
+    normalized_byte_count: int | None = Field(default=None, gt=0)
     request_id: str
     created_at: datetime
     new_provider_calls: int = Field(default=0, ge=0, le=1)
@@ -201,7 +237,7 @@ class GeminiProviderCheckpoint(BaseModel):
             raise ValueError("Checkpoint timestamps must be timezone-aware")
         return value.astimezone(UTC)
 
-    @field_validator("source_sha256")
+    @field_validator("source_sha256", "normalized_sha256")
     @classmethod
     def validate_optional_digest(cls, value: str | None) -> str | None:
         if value is not None and (
@@ -266,19 +302,24 @@ class CheckpointStore:
             self.update(current_stage=stage, stage_results=tuple(completed))
 
     def persist_generated(self, image: GeneratedImage) -> GeminiProviderCheckpoint:
-        """Store valid PNG bytes before anything else can fail."""
+        """Store the exact provider source bytes before anything else can fail."""
         checkpoint = self.read()
         if (
             checkpoint.new_provider_calls != 1
             or checkpoint.operation_state != "provider_call_started"
         ):
             raise SafeSmokeError("SAFE_UNEXPECTED_FAILURE")
-        destination = self.private_root / checkpoint.evidence_id / "source.png"
+        destination = (
+            self.private_root / checkpoint.evidence_id / f"source.{image.source_extension}"
+        )
         _atomic_write(destination, image.data)
         delivery = image.safe_generation_metadata.get("delivery")
         return self.update(
             operation_state="generated",
+            source_mime_type=image.source_mime_type,
+            source_extension=image.source_extension,
             source_sha256=hashlib.sha256(image.data).hexdigest(),
+            source_byte_size=len(image.data),
             generated_byte_count=len(image.data),
             source_path=str(destination.resolve()),
             delivery_mode=delivery if isinstance(delivery, str) else None,
@@ -305,7 +346,7 @@ class CheckpointStore:
         )
 
     def recover_image(self, model: str) -> GeneratedImage:
-        """Rebuild the generated image from persisted bytes without calling Gemini."""
+        """Rebuild the source image from persisted bytes without calling Gemini."""
         checkpoint = self.read()
         if checkpoint.source_path is None or checkpoint.source_sha256 is None:
             raise SafeSmokeError("SAFE_UNEXPECTED_FAILURE")
@@ -317,6 +358,8 @@ class CheckpointStore:
             raise SafeSmokeError("SAFE_UNEXPECTED_FAILURE")
         return GeneratedImage(
             data=data,
+            source_mime_type=checkpoint.source_mime_type or GEMINI_SOURCE_MIME_TYPE,  # type: ignore[arg-type]
+            source_extension=checkpoint.source_extension or GEMINI_SOURCE_EXTENSION,  # type: ignore[arg-type]
             provider=GOOGLE_GEMINI_PROVIDER,
             model=model,
             provider_created_at=checkpoint.created_at,
@@ -332,6 +375,9 @@ class SmokeOutcome:
     image: GeneratedImage | None = None
     operation_id: str | None = None
     source_sha256: str | None = None
+    source_mime_type: str | None = None
+    source_byte_size: int | None = None
+    normalized_byte_count: int | None = None
     provider_code: str | None = None
     provider_status: int | None = None
     safe_reason_code: str | None = None
@@ -388,6 +434,14 @@ def _category(
 ) -> tuple[SafeCategory, str | None, int | None, str | None, str | None]:
     if isinstance(exc, SafeSmokeError):
         return exc.category, None, None, None, None
+    if isinstance(exc, ImageNormalizationError):
+        return (
+            NORMALIZATION_CATEGORIES.get(exc.code, "SAFE_UNEXPECTED_FAILURE"),
+            exc.code,
+            None,
+            exc.code.upper(),
+            None,
+        )
     if isinstance(exc, GenerationProviderError):
         return (
             PROVIDER_CATEGORIES.get(exc.code, "SAFE_UNEXPECTED_FAILURE"),
@@ -408,7 +462,7 @@ def expected_request_payload(model: str, prompt: str) -> dict[str, Any]:
         "input": [{"type": "text", "text": prompt}],
         "response_format": {
             "type": "image",
-            "mime_type": GEMINI_OUTPUT_MIME_TYPE,
+            "mime_type": GEMINI_REQUEST_MIME_TYPE,
             "aspect_ratio": GEMINI_IMAGE_ASPECT_RATIO,
             "image_size": GEMINI_IMAGE_SIZE,
             "delivery": GEMINI_IMAGE_DELIVERY,
@@ -557,7 +611,6 @@ def execute_live(
             raise SafeSmokeError("INVALID_REQUEST")
         tracker.begin("prior_checkpoint_classification")
         prior = classify_prior_checkpoint(store, config)
-        tracker.begin("ambiguous_checkpoint_archival")
         if start_new_operation_after_ambiguous:
             if prior != "ambiguous":
                 raise SafeSmokeError("NO_AMBIGUOUS_CHECKPOINT")
@@ -581,21 +634,30 @@ def execute_live(
                 store.persist_provider_failure(exc)
                 raise
             checkpoint = store.persist_generated(image)
-        tracker.begin("png_validation")
         if image.provider != GOOGLE_GEMINI_PROVIDER or not image.ai_generated:
             raise SafeSmokeError("MALFORMED_RESPONSE")
-        if (
-            image.media_type != GEMINI_OUTPUT_MIME_TYPE
-            or image.file_extension != "png"
-            or not image.data.startswith(b"\x89PNG\r\n\x1a\n")
-        ):
-            raise SafeSmokeError("NON_PNG_RESPONSE")
+        if image.source_mime_type != GEMINI_SOURCE_MIME_TYPE:
+            raise SafeSmokeError("UNSUPPORTED_SOURCE_MIME")
         if len(image.data) > config.max_image_bytes:
             raise SafeSmokeError("RESPONSE_TOO_LARGE")
         tracker.begin("source_hash")
         digest = hashlib.sha256(image.data).hexdigest()
+        tracker.begin("deterministic_png_normalization")
+        normalized = normalize_to_png(image.data, source_mime_type=image.source_mime_type)
+        tracker.begin("normalized_png_validation")
+        if not normalized.data.startswith(PNG_MAGIC):
+            raise SafeSmokeError("NON_PNG_NORMALIZED_OUTPUT")
+        if normalized.mime_type != SEALED_IMAGE_MIME_TYPE:
+            raise SafeSmokeError("NON_PNG_NORMALIZED_OUTPUT")
+        if hashlib.sha256(normalized.data).hexdigest() == digest:
+            raise SafeSmokeError("SAFE_UNEXPECTED_FAILURE")
         tracker.begin("checkpoint_completion")
-        final = store.update(operation_state="complete", current_stage=None)
+        final = store.update(
+            operation_state="complete",
+            current_stage=None,
+            normalized_sha256=hashlib.sha256(normalized.data).hexdigest(),
+            normalized_byte_count=len(normalized.data),
+        )
         if final.source_sha256 != digest:
             raise SafeSmokeError("SAFE_UNEXPECTED_FAILURE")
         return SmokeOutcome(
@@ -605,6 +667,9 @@ def execute_live(
             image=image,
             operation_id=final.operation_id,
             source_sha256=digest,
+            source_mime_type=image.source_mime_type,
+            source_byte_size=len(image.data),
+            normalized_byte_count=len(normalized.data),
             provider_calls=calls,
             recovered=recovered,
             prior_class=prior,
@@ -625,6 +690,8 @@ def execute_live(
             image=image,
             operation_id=active.operation_id if active is not None else None,
             source_sha256=digest,
+            source_mime_type=active.source_mime_type if active is not None else None,
+            source_byte_size=active.source_byte_size if active is not None else None,
             provider_code=code,
             provider_status=status,
             safe_reason_code=reason,
@@ -647,17 +714,21 @@ def _print_outcome(outcome: SmokeOutcome) -> None:
         print(f"provider model name: {display_name or 'UNDECLARED'}")
     print(f"generation endpoint: {GEMINI_INTERACTIONS_PATH}")
     print(f"requested delivery: {GEMINI_IMAGE_DELIVERY}")
+    print(f"requested source MIME: {GEMINI_REQUEST_MIME_TYPE}")
+    print(f"sealed MIME: {SEALED_IMAGE_MIME_TYPE}")
     print("read-only model preflight: NOT PERFORMED (diagnostic-only)")
     print(f"operation id: {outcome.operation_id or 'UNAVAILABLE'}")
     print(f"prior checkpoint class: {outcome.prior_class or 'UNCLASSIFIED'}")
     print(f"new operator-authorized operation: {str(outcome.new_operation).lower()}")
-    print(f"ambiguous checkpoint archived: {str(outcome.archived).lower()}")
+    print(f"{ARCHIVAL_STAGE}: {str(outcome.archived).lower()}")
     print(f"new generation requests: {outcome.provider_calls}")
     print(f"recovered from persisted bytes: {str(outcome.recovered).lower()}")
     print(f"URI delivery used: {str(outcome.delivery_mode == GEMINI_IMAGE_DELIVERY).lower()}")
+    print(f"provider source MIME: {outcome.source_mime_type or 'UNAVAILABLE'}")
     if outcome.image is not None:
-        print(f"generated byte count: {len(outcome.image.data)}")
-        print(f"SHA-256: {outcome.source_sha256 or 'UNAVAILABLE'}")
+        print(f"source byte size: {outcome.source_byte_size or len(outcome.image.data)}")
+        print(f"source SHA-256: {outcome.source_sha256 or 'UNAVAILABLE'}")
+        print(f"normalized PNG byte count: {outcome.normalized_byte_count or 'UNAVAILABLE'}")
         print(f"ai_generated: {str(outcome.image.ai_generated).lower()}")
     print("stage table:")
     for stage, status in outcome.stages:

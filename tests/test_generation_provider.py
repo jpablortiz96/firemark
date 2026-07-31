@@ -286,7 +286,7 @@ def test_download_redirect_http_failure_declared_and_streamed_oversize_are_safe(
 def test_generation_models_reject_private_invalid_and_oversized_shapes() -> None:
     with pytest.raises(ValidationError):
         GenerationRequest(prompt=" ", model="bad model", size="x", request_id="bad id")
-    with pytest.raises(ValidationError, match="not a PNG"):
+    with pytest.raises(ValidationError, match="not a image/png"):
         GeneratedImage(
             data=b"not-png",
             provider="openai",
