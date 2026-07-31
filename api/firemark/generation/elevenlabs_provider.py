@@ -56,7 +56,9 @@ class ElevenLabsAudioProvider:
             return "rate_limit"
         if status == 402:
             return "quota_or_billing"
-        if status in {400, 404, 422}:
+        if status == 404:
+            return "voice_not_found"
+        if status in {400, 422}:
             return "invalid_request"
         if status in {408, 504}:
             return "timeout"
@@ -100,9 +102,15 @@ class ElevenLabsAudioProvider:
             raise GenerationProviderError("unavailable") from None
         request_id = response_headers.get("request-id") or response_headers.get("x-request-id")
         safe_request_id = request_id if request_id and _SAFE_REQUEST_ID.fullmatch(request_id) else None
+        payload = bytes(data)
+        has_mpeg_frame = (
+            len(payload) >= 2 and payload[0] == 0xFF and payload[1] & 0xE0 == 0xE0
+        )
+        if not payload.startswith(b"ID3") and not has_mpeg_frame:
+            raise GenerationProviderError("non_mp3_response")
         try:
             return GeneratedAudio(
-                data=bytes(data),
+                data=payload,
                 provider="elevenlabs",
                 model=request.model,
                 voice_id=request.voice_id,

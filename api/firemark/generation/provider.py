@@ -23,7 +23,9 @@ ProviderFailureCode = Literal[
     "unavailable",
     "malformed_response",
     "non_png_response",
+    "non_mp3_response",
     "response_too_large",
+    "voice_not_found",
     "unsupported_media_type",
 ]
 

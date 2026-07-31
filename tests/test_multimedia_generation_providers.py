@@ -237,7 +237,7 @@ def test_elevenlabs_rejects_wrong_type_and_oversized_audio() -> None:
 
 @pytest.mark.parametrize(
     ("status", "code"),
-    [(302, "malformed_response"), (401, "authentication"), (402, "quota_or_billing"), (403, "permission_denied"), (408, "timeout"), (422, "invalid_request"), (429, "rate_limit"), (503, "unavailable")],
+    [(302, "malformed_response"), (401, "authentication"), (402, "quota_or_billing"), (403, "permission_denied"), (404, "voice_not_found"), (408, "timeout"), (422, "invalid_request"), (429, "rate_limit"), (503, "unavailable")],
 )
 def test_elevenlabs_normalizes_http_failures(status: int, code: str) -> None:
     provider = ElevenLabsAudioProvider(
@@ -302,7 +302,7 @@ def test_elevenlabs_default_client_transport_and_malformed_mp3_are_safe() -> Non
     )
     with pytest.raises(GenerationProviderError) as caught:
         malformed.generate_audio(request)
-    assert caught.value.code == "malformed_response"
+    assert caught.value.code == "non_mp3_response"
 
 
 def test_audio_models_reject_unsafe_private_and_provider_metadata() -> None:
