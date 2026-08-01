@@ -1,34 +1,28 @@
 """Bounded Google Gemini adapter for the official Interactions API.
 
 FIREMARK calls the Google Gemini API directly with a Google AI Studio key. The
-generation contract is the documented Interactions API:
+generation contract is the shape the official ``gemini-3.1-flash-image``
+image-generation REST examples use:
 
     POST https://generativelanguage.googleapis.com/v1beta/interactions
     x-goog-api-key: <GEMINI_API_KEY>
     {"model": "<model>",
      "input": [{"type": "text", "text": "<prompt>"}],
      "response_format": {"type": "image", "mime_type": "image/jpeg",
-                         "aspect_ratio": "1:1", "image_size": "1K",
-                         "delivery": "uri"},
-     "stream": false, "background": false, "store": false}
+                         "aspect_ratio": "1:1", "image_size": "1K"}}
 
-``ImageResponseFormat`` accepts ``image/jpeg`` for URI delivery; ``image/png``
-is rejected there with HTTP 400 INVALID_REQUEST. FIREMARK therefore requests the
-accurate JPEG source and normalizes it into the sealed PNG carrier separately,
-so a JPEG is never relabelled as a PNG.
+The generic Interactions OpenAPI schema advertises more ``ResponseFormat``
+capabilities than any single model implements. ``delivery`` in particular is
+part of the generic schema but is not present in the documented image-generation
+examples, and sending it was rejected with HTTP 400 INVALID_REQUEST. FIREMARK
+therefore sends only the fields the model's own examples use and reads the image
+inline.
 
-`delivery: "uri"` keeps the synchronous interaction response small. A large
-inline Base64 image forces a multi-megabyte body through the same connection
-that carries the interaction metadata, and a failure while receiving it cannot
-be distinguished from an unfinished generation. Requesting a URI moves the bytes
-into a separate, independently bounded download that can fail without making the
-interaction outcome ambiguous.
-
-The provider URI is transient private provider data. It is never printed,
-logged, persisted, checkpointed, reported, returned in public certificate data,
-or attached to an exception. FIREMARK never contacts GMI Cloud, never sends an
-``Authorization`` bearer header, and never logs or persists a raw provider
-response.
+The image arrives as Base64 in ``output_image.data`` or in an ``image`` content
+block inside ``steps``. FIREMARK never contacts GMI Cloud, never sends an
+``Authorization`` bearer header, never sends the API key anywhere except
+``generativelanguage.googleapis.com``, and never logs or persists a raw provider
+response, a provider error message, or a request body.
 """
 
 from __future__ import annotations
@@ -36,14 +30,12 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import ipaddress
 import re
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -58,6 +50,56 @@ from api.firemark.generation.provider_identity import (
     provider_model_display_name,
 )
 
+HTTPClientFactory = Callable[[], httpx.Client]
+StageCallback = Callable[[str], None]
+
+GEMINI_API_HOST = "generativelanguage.googleapis.com"
+GEMINI_API_BASE_URL = f"https://{GEMINI_API_HOST}"
+GEMINI_API_VERSION = "v1beta"
+GEMINI_INTERACTIONS_PATH = f"/{GEMINI_API_VERSION}/interactions"
+GEMINI_MODELS_PATH = f"/{GEMINI_API_VERSION}/models"
+#: The documented image-generation examples request JPEG. ``image/png`` is not a
+#: valid ``ImageResponseFormat`` MIME value and is rejected with HTTP 400.
+GEMINI_REQUEST_MIME_TYPE: Final = "image/jpeg"
+GEMINI_SOURCE_MIME_TYPE: Final = "image/jpeg"
+GEMINI_SOURCE_EXTENSION: Final = "jpg"
+GEMINI_SEALED_MIME_TYPE: Final = "image/png"
+GEMINI_IMAGE_ASPECT_RATIO: Final = "1:1"
+GEMINI_IMAGE_SIZE: Final = "1K"
+
+#: Fields the generic Interactions schema exposes that the image model's own
+#: documented examples do not use. Sending them produced HTTP 400, so the
+#: request builder asserts their absence.
+FORBIDDEN_REQUEST_FIELDS: Final = frozenset(
+    {
+        "delivery",
+        "stream",
+        "background",
+        "store",
+        "response_modalities",
+        "responseModalities",
+        "generationConfig",
+        "generation_config",
+        "tools",
+        "previous_interaction_id",
+        "contents",
+        "n",
+        "quality",
+        "size",
+    }
+)
+
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_SAFE_METHOD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}$")
+_SAFE_ERROR_STATUS = re.compile(r"^[A-Z0-9_]{1,64}$")
+_SAFE_FIELD_PATH = re.compile(r"^[A-Za-z0-9_.\[\]-]{1,160}$")
+_MAX_INVALID_FIELDS = 16
+_BAD_REQUEST_TYPE = "google.rpc.BadRequest"
+_METADATA_RESPONSE_LIMIT = 512 * 1024
+_MODEL_RESOURCE_PREFIX = "models/"
+_COMPLETED_STATUS = "completed"
+_BUDGET_STATUS = "budget_exceeded"
+
 #: Normalization failures mapped to safe provider failure codes. The reason code
 #: preserves the exact structural cause without echoing any image bytes.
 _NORMALIZATION_FAILURES: dict[str, ProviderFailureCode] = {
@@ -70,56 +112,6 @@ _NORMALIZATION_FAILURES: dict[str, ProviderFailureCode] = {
     "png_normalization_failure": "malformed_response",
     "non_png_normalized_output": "non_png_response",
 }
-
-
-def _normalization_error(exc: ImageNormalizationError) -> GenerationProviderError:
-    """Translate a normalization failure into a safe provider failure."""
-    return GenerationProviderError(
-        _NORMALIZATION_FAILURES.get(exc.code, "malformed_response"),
-        safe_reason_code=exc.code.upper(),
-    )
-
-HTTPClientFactory = Callable[[], httpx.Client]
-StageCallback = Callable[[str], None]
-
-GEMINI_API_HOST = "generativelanguage.googleapis.com"
-GEMINI_API_BASE_URL = f"https://{GEMINI_API_HOST}"
-GEMINI_API_VERSION = "v1beta"
-GEMINI_INTERACTIONS_PATH = f"/{GEMINI_API_VERSION}/interactions"
-GEMINI_MODELS_PATH = f"/{GEMINI_API_VERSION}/models"
-#: The Interactions ``ImageResponseFormat`` accepts ``image/jpeg`` for URI
-#: delivery. Requesting ``image/png`` there is rejected with HTTP 400
-#: INVALID_REQUEST, so FIREMARK asks for the accurate JPEG source and
-#: normalizes it into the sealed PNG carrier afterwards.
-GEMINI_REQUEST_MIME_TYPE: Final = "image/jpeg"
-GEMINI_SOURCE_MIME_TYPE: Final = "image/jpeg"
-GEMINI_SOURCE_EXTENSION: Final = "jpg"
-GEMINI_SEALED_MIME_TYPE: Final = "image/png"
-GEMINI_IMAGE_ASPECT_RATIO = "1:1"
-GEMINI_IMAGE_SIZE = "1K"
-GEMINI_IMAGE_DELIVERY = "uri"
-
-#: Google-hosted origins that may serve a generated image. The Gemini API host
-#: serves Files API downloads; signed media is served from Google storage and
-#: user-content origins.
-GOOGLE_MEDIA_HOSTS = frozenset({GEMINI_API_HOST, "storage.googleapis.com"})
-GOOGLE_MEDIA_HOST_SUFFIXES = (".googleapis.com", ".googleusercontent.com")
-#: The API key is presented only to the Gemini API host itself. A signed Google
-#: storage or user-content URL already carries its own authorization.
-API_KEY_HOSTS = frozenset({GEMINI_API_HOST})
-MAX_IMAGE_URI_LENGTH = 2048
-MAX_IMAGE_URI_REDIRECTS = 1
-#: Binary image types Google documents for generated image delivery. Only the
-#: requested JPEG is accepted as a FIREMARK source; anything else is reported as
-#: an unsupported provider source MIME type.
-DOCUMENTED_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
-
-_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_SAFE_METHOD_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,63}$")
-_METADATA_RESPONSE_LIMIT = 512 * 1024
-_MODEL_RESOURCE_PREFIX = "models/"
-_COMPLETED_STATUS = "completed"
-_BUDGET_STATUS = "budget_exceeded"
 
 #: httpx failure classes mapped to a stable safe reason code. Order matters:
 #: the most specific class must be tested first.
@@ -140,6 +132,14 @@ _TRANSPORT_REASONS: tuple[tuple[type[Exception], ProviderFailureCode, str], ...]
 )
 
 
+def _normalization_error(exc: ImageNormalizationError) -> GenerationProviderError:
+    """Translate a normalization failure into a safe provider failure."""
+    return GenerationProviderError(
+        _NORMALIZATION_FAILURES.get(exc.code, "malformed_response"),
+        safe_reason_code=exc.code.upper(),
+    )
+
+
 @dataclass(frozen=True)
 class GeminiModelAccess:
     """Safe read-only model metadata result without raw provider fields."""
@@ -151,27 +151,22 @@ class GeminiModelAccess:
 
 
 @dataclass(frozen=True)
-class _ImageReference:
-    """One final image reference extracted from an interaction response.
+class _InlineImage:
+    """One inline image content block extracted from an interaction response."""
 
-    ``uri`` is transient private provider data and never leaves the in-memory
-    download operation.
-    """
-
-    uri: str | None = None
     data: str | None = None
     mime_type: str | None = None
 
 
 @dataclass(frozen=True)
-class _DownloadedImage:
+class _DecodedImage:
     data: bytes
     mime_type: str
     sha256: str
 
 
 class GeminiImageProvider:
-    """Generate exactly one JPEG source through Google's documented Interactions API."""
+    """Generate exactly one inline JPEG through Google's Interactions API."""
 
     def __init__(
         self,
@@ -180,7 +175,6 @@ class GeminiImageProvider:
         timeout_seconds: int,
         max_image_bytes: int,
         client_factory: HTTPClientFactory | None = None,
-        download_client_factory: HTTPClientFactory | None = None,
         now: Callable[[], datetime] | None = None,
         stage_callback: StageCallback | None = None,
     ) -> None:
@@ -188,7 +182,6 @@ class GeminiImageProvider:
         self._timeout_seconds = timeout_seconds
         self._max_image_bytes = max_image_bytes
         self._client_factory = client_factory
-        self._download_client_factory = download_client_factory
         self._now = now or (lambda: datetime.now(UTC))
         self._stage = stage_callback or (lambda _stage: None)
 
@@ -196,7 +189,11 @@ class GeminiImageProvider:
         return "GeminiImageProvider(api_key=<redacted>)"
 
     def _timeout(self) -> httpx.Timeout:
-        """Bound connect, read, write and pool acquisition independently."""
+        """Bound connect, read, write and pool acquisition independently.
+
+        The read timeout covers one image generation; the handshake phases are
+        capped much lower so a stalled connection fails fast.
+        """
         seconds = float(self._timeout_seconds)
         handshake = min(30.0, seconds)
         return httpx.Timeout(seconds, connect=handshake, write=handshake, pool=handshake)
@@ -208,17 +205,21 @@ class GeminiImageProvider:
             base_url=GEMINI_API_BASE_URL,
             follow_redirects=False,
             timeout=self._timeout(),
+            http1=True,
+            http2=False,
         )
 
-    def _download_client(self) -> httpx.Client:
-        """Build an independent client for the bounded image download."""
-        if self._download_client_factory is not None:
-            return self._download_client_factory()
-        return httpx.Client(follow_redirects=False, timeout=self._timeout())
-
     def _headers(self, *, json_body: bool) -> dict[str, str]:
-        """Authenticate a Google AI Studio key only through ``x-goog-api-key``."""
-        headers = {"x-goog-api-key": self._api_key, "Accept": "application/json"}
+        """Authenticate a Google AI Studio key only through ``x-goog-api-key``.
+
+        ``Accept-Encoding: identity`` keeps the streamed byte bound meaningful:
+        a compressed body would otherwise expand past the limit after decoding.
+        """
+        headers = {
+            "x-goog-api-key": self._api_key,
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        }
         if json_body:
             headers["Content-Type"] = "application/json"
         return headers
@@ -227,32 +228,74 @@ class GeminiImageProvider:
     # Safe failure classification
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _safe_error_details(response: httpx.Response) -> tuple[str | None, str]:
+    @classmethod
+    def _invalid_fields(cls, error: dict[str, Any]) -> tuple[str, ...]:
+        """Extract only allowlisted ``google.rpc.BadRequest`` field paths.
+
+        Field violation descriptions and every other detail payload are dropped.
+        A field name is never invented when Google does not supply one.
+        """
+        details = error.get("details")
+        if not isinstance(details, list):
+            return ()
+        fields: list[str] = []
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            detail_type = detail.get("@type")
+            if not isinstance(detail_type, str) or _BAD_REQUEST_TYPE not in detail_type:
+                continue
+            violations = detail.get("fieldViolations", detail.get("field_violations"))
+            if not isinstance(violations, list):
+                continue
+            for violation in violations:
+                if not isinstance(violation, dict):
+                    continue
+                field = violation.get("field")
+                if (
+                    isinstance(field, str)
+                    and _SAFE_FIELD_PATH.fullmatch(field)
+                    and field not in fields
+                ):
+                    fields.append(field)
+                if len(fields) >= _MAX_INVALID_FIELDS:
+                    return tuple(fields)
+        return tuple(fields)
+
+    @classmethod
+    def _safe_error_details(
+        cls, response: httpx.Response
+    ) -> tuple[str | None, str, tuple[str, ...]]:
+        """Return the safe status token, a lowercased message used only for
+        local classification, and allowlisted invalid field paths.
+
+        The message is never returned to a caller, persisted or printed; it is
+        consumed here to choose a normalized failure code and then discarded.
+        """
         reason: str | None = None
         message = ""
+        fields: tuple[str, ...] = ()
         try:
             payload = response.json()
             error = payload.get("error") if isinstance(payload, dict) else None
             if isinstance(error, dict):
                 raw_reason = error.get("status")
-                if (
-                    isinstance(raw_reason, str)
-                    and raw_reason.replace("_", "").isalnum()
-                    and len(raw_reason) <= 64
+                if isinstance(raw_reason, str) and _SAFE_ERROR_STATUS.fullmatch(
+                    raw_reason.upper()
                 ):
                     reason = raw_reason.upper()
                 raw_message = error.get("message")
                 if isinstance(raw_message, str):
                     message = raw_message.lower()
+                fields = cls._invalid_fields(error)
         except (ValueError, TypeError):
             pass
-        return reason, message
+        return reason, message, fields
 
     @classmethod
     def _failure_code(cls, response: httpx.Response) -> ProviderFailureCode:
         status = response.status_code
-        reason, message = cls._safe_error_details(response)
+        reason, message, _ = cls._safe_error_details(response)
         if status == 401:
             return "authentication"
         if status == 403:
@@ -283,11 +326,12 @@ class GeminiImageProvider:
 
     @classmethod
     def _provider_error(cls, response: httpx.Response) -> GenerationProviderError:
-        reason, _ = cls._safe_error_details(response)
+        reason, _, fields = cls._safe_error_details(response)
         return GenerationProviderError(
             cls._failure_code(response),
             status_code=response.status_code,
             safe_reason_code=reason or f"HTTP_{response.status_code}",
+            safe_invalid_fields=fields,
         )
 
     @staticmethod
@@ -322,7 +366,7 @@ class GeminiImageProvider:
 
     @staticmethod
     def build_request_parameters(request: GenerationRequest) -> dict[str, Any]:
-        """Build the documented Interactions request for one PNG delivered by URI."""
+        """Build the minimal documented Interactions request for one inline JPEG."""
         if request.model.startswith(_MODEL_RESOURCE_PREFIX):
             raise GenerationProviderError(
                 "invalid_request", safe_reason_code="DUPLICATE_MODEL_PREFIX"
@@ -335,19 +379,16 @@ class GeminiImageProvider:
                 "mime_type": GEMINI_REQUEST_MIME_TYPE,
                 "aspect_ratio": GEMINI_IMAGE_ASPECT_RATIO,
                 "image_size": GEMINI_IMAGE_SIZE,
-                "delivery": GEMINI_IMAGE_DELIVERY,
             },
-            "stream": False,
-            "background": False,
-            "store": False,
         }
 
     # ------------------------------------------------------------------
-    # Read-only diagnostics
+    # Bounded transport
     # ------------------------------------------------------------------
 
     @staticmethod
     def _buffer_response(response: httpx.Response, *, max_bytes: int) -> httpx.Response:
+        """Read a streamed body while enforcing a hard byte ceiling."""
         declared = response.headers.get("content-length")
         if declared is not None:
             try:
@@ -367,6 +408,10 @@ class GeminiImageProvider:
             request=response.request,
         )
 
+    def _max_response_bytes(self) -> int:
+        """Bound the inline JSON body around the Base64-expanded image."""
+        return self._max_image_bytes * 2 + _METADATA_RESPONSE_LIMIT
+
     def _read_only_get(self, path: str) -> httpx.Response:
         try:
             with self._client() as client:
@@ -383,6 +428,10 @@ class GeminiImageProvider:
         if not response.is_success:
             raise self._provider_error(response)
         return response
+
+    # ------------------------------------------------------------------
+    # Read-only diagnostics
+    # ------------------------------------------------------------------
 
     def list_models(self) -> tuple[str, ...]:
         """Return safe model identifiers from the read-only model listing."""
@@ -439,23 +488,22 @@ class GeminiImageProvider:
     # ------------------------------------------------------------------
 
     def _submit_interaction(self, request: GenerationRequest) -> httpx.Response:
-        """Submit one unary interaction and read its small metadata response.
-
-        The response is read without transport streaming because `delivery: uri`
-        keeps it small. The buffered body is still bounded afterwards so a
-        provider that ignores the requested delivery mode fails closed instead of
-        being accepted.
-        """
+        """Submit one unary interaction and read its bounded streamed body."""
         payload = self.build_request_parameters(request)
         self._stage("interaction_submission")
         try:
             with self._client() as client:
-                response = client.post(
+                with client.stream(
+                    "POST",
                     GEMINI_INTERACTIONS_PATH,
                     headers=self._headers(json_body=True),
                     json=payload,
-                )
-                body = response.content
+                ) as raw_response:
+                    response = self._buffer_response(
+                        raw_response, max_bytes=self._max_response_bytes()
+                    )
+        except GenerationProviderError:
+            raise
         except httpx.HTTPError as exc:
             raise self._transport_error(exc) from None
         if 300 <= response.status_code < 400:
@@ -464,10 +512,6 @@ class GeminiImageProvider:
             )
         if not response.is_success:
             raise self._provider_error(response)
-        if len(body) > self._max_image_bytes * 2 + _METADATA_RESPONSE_LIMIT:
-            raise GenerationProviderError(
-                "response_too_large", safe_reason_code="INTERACTION_BODY_TOO_LARGE"
-            )
         return response
 
     @classmethod
@@ -484,19 +528,17 @@ class GeminiImageProvider:
         )
 
     @staticmethod
-    def _image_block(block: dict[str, Any]) -> _ImageReference:
-        uri = block.get("uri")
+    def _image_block(block: dict[str, Any]) -> _InlineImage:
         data = block.get("data")
         mime_type = block.get("mime_type", block.get("mimeType"))
-        return _ImageReference(
-            uri=uri if isinstance(uri, str) else None,
+        return _InlineImage(
             data=data if isinstance(data, str) else None,
             mime_type=mime_type if isinstance(mime_type, str) else None,
         )
 
     @classmethod
-    def _interaction_images(cls, payload: dict[str, Any]) -> list[_ImageReference]:
-        """Return the documented final image references without inventing a schema."""
+    def _interaction_images(cls, payload: dict[str, Any]) -> list[_InlineImage]:
+        """Return the documented inline image blocks without inventing a schema."""
         output_image = payload.get("output_image")
         if isinstance(output_image, dict):
             return [cls._image_block(output_image)]
@@ -505,7 +547,7 @@ class GeminiImageProvider:
             return []
         if not isinstance(steps, list):
             raise GenerationProviderError("malformed_response")
-        images: list[_ImageReference] = []
+        images: list[_InlineImage] = []
         for step in steps:
             if not isinstance(step, dict):
                 raise GenerationProviderError("malformed_response")
@@ -521,169 +563,49 @@ class GeminiImageProvider:
             )
         return images
 
-    def _image_reference(self, response: httpx.Response) -> _ImageReference:
-        self._stage("interaction_metadata_validation")
+    def _inline_image(self, response: httpx.Response) -> _InlineImage:
+        self._stage("inline_metadata_validation")
         try:
             payload = response.json()
         except (ValueError, TypeError):
-            raise GenerationProviderError("malformed_response") from None
+            raise GenerationProviderError(
+                "malformed_response", safe_reason_code="INTERACTION_BODY_NOT_JSON"
+            ) from None
         if not isinstance(payload, dict):
             raise GenerationProviderError("malformed_response")
         self._reject_incomplete_status(payload)
         images = self._interaction_images(payload)
         if len(images) != 1:
             raise GenerationProviderError("malformed_response")
-        reference = images[0]
-        if reference.uri is None and reference.data is None:
+        image = images[0]
+        if image.data is None:
             raise GenerationProviderError(
-                "malformed_response", safe_reason_code="IMAGE_REFERENCE_MISSING"
+                "malformed_response", safe_reason_code="INLINE_IMAGE_MISSING"
             )
-        return reference
+        return image
 
-    # ------------------------------------------------------------------
-    # Transient URI validation and bounded download
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _reject_uri(reason: str) -> GenerationProviderError:
-        """Build a URI failure that never contains the URI itself."""
-        return GenerationProviderError("malformed_response", safe_reason_code=reason)
-
-    @classmethod
-    def _validated_image_uri(cls, uri: str) -> tuple[str, bool]:
-        """Validate a transient provider URI and decide whether the key may be sent.
-
-        Returns the accepted URI and whether the Gemini API key may accompany the
-        download. The URI is never logged, persisted or placed in an exception.
-        """
-        if not isinstance(uri, str) or not uri:
-            raise cls._reject_uri("IMAGE_URI_MISSING")
-        if len(uri) > MAX_IMAGE_URI_LENGTH:
-            raise cls._reject_uri("IMAGE_URI_TOO_LONG")
-        try:
-            parsed = urlsplit(uri)
-            hostname = parsed.hostname
-            parsed.port  # noqa: B018 - raises ValueError for an invalid port
-        except ValueError:
-            raise cls._reject_uri("IMAGE_URI_MALFORMED") from None
-        if parsed.scheme.lower() != "https":
-            raise cls._reject_uri("IMAGE_URI_SCHEME_REJECTED")
-        if parsed.username or parsed.password:
-            raise cls._reject_uri("IMAGE_URI_CREDENTIALS_REJECTED")
-        if parsed.fragment:
-            raise cls._reject_uri("IMAGE_URI_FRAGMENT_REJECTED")
-        if not hostname:
-            raise cls._reject_uri("IMAGE_URI_HOST_MISSING")
-        host = hostname.lower()
-        if host == "localhost" or host.endswith(".localhost"):
-            raise cls._reject_uri("IMAGE_URI_PRIVATE_HOST_REJECTED")
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            address = None
-        if address is not None and (
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_multicast
-            or address.is_unspecified
-        ):
-            raise cls._reject_uri("IMAGE_URI_PRIVATE_HOST_REJECTED")
-        allowed = host in GOOGLE_MEDIA_HOSTS or host.endswith(GOOGLE_MEDIA_HOST_SUFFIXES)
-        if not allowed:
-            raise cls._reject_uri("IMAGE_URI_HOST_REJECTED")
-        return uri, host in API_KEY_HOSTS
-
-    def _download_image(self, uri: str, *, send_api_key: bool) -> _DownloadedImage:
-        """Download the generated image through an independent bounded client."""
-        self._stage("jpeg_download")
-        target = uri
-        authorized = send_api_key
-        redirects_remaining = MAX_IMAGE_URI_REDIRECTS
-        try:
-            with self._download_client() as client:
-                while True:
-                    headers = {"Accept": ", ".join(sorted(DOCUMENTED_IMAGE_MIME_TYPES))}
-                    if authorized:
-                        headers["x-goog-api-key"] = self._api_key
-                    with client.stream("GET", target, headers=headers) as response:
-                        if 300 <= response.status_code < 400:
-                            location = response.headers.get("location")
-                            if redirects_remaining <= 0 or not isinstance(location, str):
-                                raise self._reject_uri("IMAGE_URI_REDIRECT_REJECTED")
-                            redirects_remaining -= 1
-                            target, authorized = self._validated_image_uri(location)
-                            continue
-                        if not response.is_success:
-                            raise self._provider_error(response)
-                        return self._read_image_body(response)
-        except GenerationProviderError:
-            raise
-        except httpx.HTTPError as exc:
-            raise self._transport_error(exc) from None
-        finally:
-            target = ""
-
-    def _read_image_body(self, response: httpx.Response) -> _DownloadedImage:
-        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        if content_type not in DOCUMENTED_IMAGE_MIME_TYPES:
-            raise GenerationProviderError(
-                "malformed_response", safe_reason_code="IMAGE_CONTENT_TYPE_REJECTED"
-            )
-        if content_type != GEMINI_SOURCE_MIME_TYPE:
-            # Reject before reading the body. FIREMARK never relabels a source
-            # format it did not request.
+    def _decode_inline_image(self, image: _InlineImage) -> _DecodedImage:
+        """Decode bounded Base64 into the exact provider source bytes."""
+        self._stage("inline_jpeg_base64_validation")
+        if image.mime_type != GEMINI_SOURCE_MIME_TYPE:
             raise GenerationProviderError(
                 "unsupported_media_type", safe_reason_code="PROVIDER_SOURCE_MIME_UNSUPPORTED"
             )
-        declared_header = response.headers.get("content-length")
-        declared: int | None = None
-        if declared_header is not None:
-            try:
-                declared = int(declared_header)
-            except ValueError:
-                raise GenerationProviderError(
-                    "malformed_response", safe_reason_code="IMAGE_CONTENT_LENGTH_INVALID"
-                ) from None
-            if declared > self._max_image_bytes:
-                raise GenerationProviderError("response_too_large")
-        digest = hashlib.sha256()
-        payload = bytearray()
-        for chunk in response.iter_bytes():
-            payload.extend(chunk)
-            if len(payload) > self._max_image_bytes:
-                raise GenerationProviderError("response_too_large")
-            digest.update(chunk)
-        if declared is not None and len(payload) != declared:
+        if not image.data:
             raise GenerationProviderError(
-                "malformed_response", safe_reason_code="IMAGE_DOWNLOAD_TRUNCATED"
+                "malformed_response", safe_reason_code="INLINE_IMAGE_EMPTY"
             )
-        return _DownloadedImage(
-            data=bytes(payload), mime_type=content_type, sha256=digest.hexdigest()
-        )
-
-    def _decode_inline_image(self, reference: _ImageReference) -> _DownloadedImage:
-        """Defensive path for a provider that ignores the requested URI delivery."""
-        if reference.mime_type not in DOCUMENTED_IMAGE_MIME_TYPES:
-            raise GenerationProviderError(
-                "malformed_response", safe_reason_code="IMAGE_CONTENT_TYPE_REJECTED"
-            )
-        if not reference.data:
-            raise GenerationProviderError("malformed_response")
         try:
-            data = base64.b64decode(reference.data, validate=True)
+            data = base64.b64decode(image.data, validate=True)
         except (ValueError, TypeError, binascii.Error):
-            raise GenerationProviderError("malformed_response") from None
+            raise GenerationProviderError(
+                "malformed_response", safe_reason_code="INLINE_IMAGE_BASE64_INVALID"
+            ) from None
         if len(data) > self._max_image_bytes:
             raise GenerationProviderError("response_too_large")
-        if reference.mime_type != GEMINI_SOURCE_MIME_TYPE:
-            raise GenerationProviderError(
-                "unsupported_media_type", safe_reason_code="PROVIDER_SOURCE_MIME_UNSUPPORTED"
-            )
-        return _DownloadedImage(
+        return _DecodedImage(
             data=data,
-            mime_type=reference.mime_type,
+            mime_type=GEMINI_SOURCE_MIME_TYPE,
             sha256=hashlib.sha256(data).hexdigest(),
         )
 
@@ -694,19 +616,11 @@ class GeminiImageProvider:
     def validate_response(
         self, response: httpx.Response, request: GenerationRequest
     ) -> GeneratedImage:
-        """Turn one interaction metadata response into validated JPEG source bytes."""
-        reference = self._image_reference(response)
-        if reference.uri is not None:
-            self._stage("image_uri_validation")
-            uri, send_api_key = self._validated_image_uri(reference.uri)
-            downloaded = self._download_image(uri, send_api_key=send_api_key)
-            delivery = GEMINI_IMAGE_DELIVERY
-        else:
-            downloaded = self._decode_inline_image(reference)
-            delivery = "inline"
+        """Turn one interaction response into validated JPEG source bytes."""
+        decoded = self._decode_inline_image(self._inline_image(response))
         self._stage("jpeg_validation")
         try:
-            facts = inspect_image_source(downloaded.data, mime_type=GEMINI_SOURCE_MIME_TYPE)
+            facts = inspect_image_source(decoded.data, mime_type=GEMINI_SOURCE_MIME_TYPE)
         except ImageNormalizationError as exc:
             raise _normalization_error(exc) from None
         request_id = response.headers.get("x-request-id")
@@ -717,11 +631,11 @@ class GeminiImageProvider:
             "requested_size": request.size,
             "provider_api": "interactions",
             "provider_api_version": GEMINI_API_VERSION,
-            "delivery": delivery,
+            "delivery": "inline",
             "aspect_ratio": GEMINI_IMAGE_ASPECT_RATIO,
             "image_size": GEMINI_IMAGE_SIZE,
             "provider_source_mime_type": GEMINI_SOURCE_MIME_TYPE,
-            "source_sha256": downloaded.sha256,
+            "source_sha256": decoded.sha256,
             "source_byte_size": facts.byte_size,
             "source_width": facts.width,
             "source_height": facts.height,
@@ -731,7 +645,7 @@ class GeminiImageProvider:
         if display_name is not None:
             metadata["provider_model_name"] = display_name
         return GeneratedImage(
-            data=downloaded.data,
+            data=decoded.data,
             source_mime_type=GEMINI_SOURCE_MIME_TYPE,
             source_extension=GEMINI_SOURCE_EXTENSION,
             width=facts.width,

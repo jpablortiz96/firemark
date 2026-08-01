@@ -56,17 +56,35 @@ POST https://generativelanguage.googleapis.com/v1beta/interactions
 {"model": "<GEMINI_IMAGE_MODEL>",
  "input": [{"type": "text", "text": "<prompt>"}],
  "response_format": {"type": "image", "mime_type": "image/jpeg",
-                     "aspect_ratio": "1:1", "image_size": "1K",
-                     "delivery": "uri"},
- "stream": false, "background": false, "store": false}
+                     "aspect_ratio": "1:1", "image_size": "1K"}}
 ```
 
-Keys are snake_case; this is the Interactions REST schema, not `generateContent`. Never send
-`Authorization: Bearer`. Never prefix the model with `models/`. Never add undocumented fields.
+Headers: `x-goog-api-key`, `Content-Type: application/json`, `Accept: application/json`,
+`Accept-Encoding: identity`. Keys are snake_case; this is the Interactions REST schema, not
+`generateContent`. Never send `Authorization: Bearer`. Never prefix the model with `models/`.
 
-**`ImageResponseFormat.mime_type` must be `image/jpeg`.** `image/png` is not a valid value for the
-URI delivery contract and is rejected with HTTP 400 `INVALID_REQUEST`. FIREMARK requests the
-accurate JPEG source and builds the PNG carrier itself.
+**Send only fields the model's own examples document.** The generic Interactions OpenAPI schema
+advertises capabilities no single model necessarily implements. `delivery` is valid in that generic
+schema but absent from the `gemini-3.1-flash-image` examples, and sending it produced HTTP 400
+`INVALID_REQUEST`. `image/png` is likewise not a valid `ImageResponseFormat` MIME value.
+`FORBIDDEN_REQUEST_FIELDS` names every field that must never be emitted — `delivery`, `stream`,
+`background`, `store`, `response_modalities`, `generationConfig`, `tools`,
+`previous_interaction_id`, `contents` — and the smoke asserts their absence before submitting.
+
+The image arrives **inline** as Base64 in `output_image.data` or an `image` content block inside
+`steps`. Never require a URI and never download a second resource; the API key is only ever
+presented to `generativelanguage.googleapis.com`. Read the JSON body as a bounded HTTP/1.1 stream
+with redirects disabled and `Accept-Encoding: identity`, and fail closed on truncated or malformed
+JSON.
+
+### Safe Google error details
+
+A bare `HTTP_400` cannot be diagnosed. For non-2xx responses extract exactly two structured facts:
+`error.status` (`[A-Z0-9_]{1,64}`) and `google.rpc.BadRequest` → `fieldViolations[].field`
+(`[A-Za-z0-9_.\[\]-]{1,160}`, at most 16). Surface them as `PROVIDER_ERROR_STATUS=` and
+`PROVIDER_INVALID_FIELDS=`. Never persist or print `error.message`, the violation description, raw
+details, the raw response, the request body, the prompt, the API key, the interaction ID or headers.
+Never invent a field name Google did not supply.
 
 ### Source versus sealed media
 
@@ -96,30 +114,6 @@ A PNG source is carried through untouched so existing evidence stays byte identi
 manifest records `{"operation": "normalize_image", "input_mime_type": ..., "output_mime_type":
 "image/png", "purpose": "firemark_public_capsule_embedding"}` on the generation step, and it stays
 private.
-
-### URI delivery
-
-`delivery: "uri"` is mandatory, not an optimization. A large inline Base64 image pushes a
-multi-megabyte body through the connection carrying the interaction metadata; a failure while
-receiving it is indistinguishable from an unfinished generation and makes the whole operation
-ambiguous. URI delivery splits this into two independently bounded operations:
-
-1. A non-streamed `POST` reads the small metadata: `status` must be `completed` with exactly one
-   final image reference (`output_image.uri`, or an `image` block inside `steps`). Inline Base64
-   stays as a defensive parser path only.
-2. A separate client downloads the bytes with bounded connect/read/write/pool timeouts, a byte
-   ceiling, an enforced content type, PNG magic-byte validation, and an immediate SHA-256.
-
-**The provider URI is transient private provider data.** Never print, log, persist, checkpoint,
-report, expose through an exception, return in public certificate data, or write it to Supabase or
-B2 metadata. Before downloading, require HTTPS, no URL credentials, no fragment, bounded length,
-and a Google-hosted allowlisted host; reject localhost, loopback, private, link-local, reserved and
-multicast addresses. Reject redirects by default; follow at most one, and only after revalidating
-the destination. Present the API key only to `generativelanguage.googleapis.com`.
-
-A download whose content type is not the requested `image/jpeg` is rejected with
-`PROVIDER_SOURCE_MIME_UNSUPPORTED` before its body is read. Never relabel bytes FIREMARK did not
-request.
 
 Certificate identity for the current image model must be exactly:
 
@@ -157,9 +151,9 @@ timeout, a truncated body and an HTTP 5xx are never confused: `TRANSPORT_CONNECT
 `TRANSPORT_READ_FAILURE`, `TRANSPORT_WRITE_FAILURE`, `TRANSPORT_REMOTE_PROTOCOL_FAILURE`,
 `TRANSPORT_LOCAL_PROTOCOL_FAILURE`, `TRANSPORT_DECODING_FAILURE`, `TRANSPORT_FAILURE`.
 
-Persist only the normalized code, the HTTP status when available, the safe reason code, and the
-exception class name from `SAFE_EXCEPTION_TOKENS`. Never persist an exception message, `repr`,
-request, response, headers, prompt, API key or URI.
+Persist only the normalized code, the HTTP status when available, the safe reason code, the
+exception class name from `SAFE_EXCEPTION_TOKENS`, and allowlisted structured field paths. Never
+persist an exception message, `repr`, request, response, headers, prompt or API key.
 
 ## Security rules
 
@@ -196,13 +190,22 @@ Live commands cost money and touch irreversible storage. Rules:
 - A definitive rejection with no captured bytes may be retried only with explicit operator
   authorization (`--allow-definitive-retry`).
 
-**Retrying an operation is not the same as starting a new one.** An ambiguous checkpoint is
-preserved verbatim: never edited, never marked retryable, never discarded, and never rewritten —
-not even its stage rows. `--allow-definitive-retry` must not unblock it. An operator may instead
-pass `--start-new-operation-after-ambiguous` (which requires `--live`) to atomically archive the
-record to `.artifacts/gemini-image-provider-checkpoints/gemini-image-provider-ambiguous-<UTC>.json`,
-mint a new operation ID, and authorize exactly one new submission. That is a new billable
-generation, and the CLI says so before it runs. A second ambiguous result fails closed again.
+**Retrying an operation is not the same as starting a new one.** A blocked checkpoint is preserved
+verbatim: never edited, never marked retryable, never discarded, and never rewritten — not even its
+stage rows. `--allow-definitive-retry` covers only the *first* definitive rejection of an operation.
+Beyond that an operator passes one of the new-operation options (both require `--live`), which
+atomically archive the record to
+`.artifacts/gemini-image-provider-checkpoints/gemini-image-provider-{definitive,ambiguous}-<UTC>.json`,
+mint a new operation ID, and authorize exactly one new submission:
+
+| Prior class | Option |
+| --- | --- |
+| `definitive_rejection` (one retry left) | `--allow-definitive-retry` |
+| `definitive_rejection_exhausted` | `--start-new-operation-after-definitive` |
+| `ambiguous` | `--start-new-operation-after-ambiguous` |
+
+Each option refuses every state it was not designed for. Starting a new operation is a new billable
+generation, and the CLI says so before it runs. A second failure fails closed again.
 - ElevenLabs starts only after the Gemini image flow completes.
 
 Safe checkpoints live under the ignored `.artifacts/` tree; private bytes go in a separate

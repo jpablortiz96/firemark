@@ -5,13 +5,14 @@ model preflight is deliberately NOT part of this path; use
 ``scripts/diagnose_gemini_access.py`` for read-only model diagnostics so a
 model-listing endpoint can never block a valid generation.
 
-Generation requests URI delivery, so the synchronous interaction response stays
-small and the image bytes arrive through a separate bounded download. The
-transient provider URI is never printed, logged, persisted or reported.
+Generation sends only the minimal request shape the model's own documented
+image-generation examples use and reads the JPEG inline. The exact source JPEG
+is preserved and normalized deterministically into the sealed PNG carrier.
 
-An ambiguous prior submission blocks execution. It is never retried. An operator
-may instead archive it and deliberately start a brand-new billable operation
-with ``--start-new-operation-after-ambiguous``.
+A prior submission that cannot continue blocks execution and is never retried in
+place. An operator may instead archive it and deliberately start a brand-new
+billable operation with ``--start-new-operation-after-definitive`` (a provider
+refusal) or ``--start-new-operation-after-ambiguous`` (an uncaptured outcome).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,8 +34,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from api.firemark.generate_and_seal import SEALED_IMAGE_MIME_TYPE
 from api.firemark.generation.gemini_provider import (
+    FORBIDDEN_REQUEST_FIELDS,
     GEMINI_IMAGE_ASPECT_RATIO,
-    GEMINI_IMAGE_DELIVERY,
     GEMINI_IMAGE_SIZE,
     GEMINI_INTERACTIONS_PATH,
     GEMINI_REQUEST_MIME_TYPE,
@@ -66,11 +67,11 @@ STAGES = (
     "configuration_validation",
     "request_construction",
     "prior_checkpoint_classification",
+    "definitive_checkpoint_archival",
     "checkpoint_before_submission",
     "interaction_submission",
-    "interaction_metadata_validation",
-    "image_uri_validation",
-    "jpeg_download",
+    "inline_metadata_validation",
+    "inline_jpeg_base64_validation",
     "jpeg_validation",
     "source_hash",
     "deterministic_png_normalization",
@@ -81,15 +82,14 @@ STAGES = (
 PROVIDER_STAGES = frozenset(
     {
         "interaction_submission",
-        "interaction_metadata_validation",
-        "image_uri_validation",
-        "jpeg_download",
+        "inline_metadata_validation",
+        "inline_jpeg_base64_validation",
         "jpeg_validation",
     }
 )
-#: An ambiguous checkpoint is archived before the stage table starts, so the
-#: archival step is reported separately from the twelve in-run stages.
-ARCHIVAL_STAGE = "ambiguous_checkpoint_archival"
+DEFINITIVE_ARCHIVAL_STAGE = "definitive_checkpoint_archival"
+AMBIGUOUS_ARCHIVAL_STAGE = "ambiguous_checkpoint_archival"
+DEFINITIVE_ARCHIVE_PREFIX = "gemini-image-provider-definitive-"
 
 SafeCategory = Literal[
     "OK",
@@ -117,6 +117,7 @@ SafeCategory = Literal[
     "AMBIGUOUS_PRIOR_SUBMISSION",
     "DEFINITIVE_REJECTION_NOT_AUTHORIZED",
     "NO_AMBIGUOUS_CHECKPOINT",
+    "NO_DEFINITIVE_CHECKPOINT",
     "SAFE_UNEXPECTED_FAILURE",
 ]
 
@@ -172,9 +173,14 @@ PriorCheckpointClass = Literal[
     "fresh",
     "recoverable",
     "definitive_rejection",
+    "definitive_rejection_exhausted",
     "ambiguous",
     "configuration_mismatch",
 ]
+#: Both definitive classes describe a provider that explicitly refused the
+#: request without producing bytes. Only the first may still be retried as the
+#: same operation; both may seed a new operator-authorized operation.
+DEFINITIVE_CLASSES: Final = frozenset({"definitive_rejection", "definitive_rejection_exhausted"})
 
 CHECKPOINT_SCHEMA_V1: Final = "firemark.gemini-image-provider-checkpoint.v1"
 CHECKPOINT_SCHEMA_V2: Final = "firemark.gemini-image-provider-checkpoint.v2"
@@ -222,6 +228,8 @@ class GeminiProviderCheckpoint(BaseModel):
     provider_failure_status: int | None = None
     provider_safe_reason_code: str | None = None
     provider_exception_token: str | None = None
+    #: Structured field paths Google named as invalid. Descriptions are dropped.
+    provider_invalid_fields: tuple[str, ...] = ()
     provider_retry_allowed: bool = False
     delivery_mode: str | None = None
     source_sha256: str | None = None
@@ -327,6 +335,7 @@ class CheckpointStore:
             provider_failure_status=None,
             provider_safe_reason_code=None,
             provider_exception_token=None,
+            provider_invalid_fields=(),
             provider_retry_allowed=False,
         )
 
@@ -342,6 +351,7 @@ class CheckpointStore:
             provider_failure_status=exc.status_code,
             provider_safe_reason_code=exc.safe_reason_code,
             provider_exception_token=exc.safe_exception_token,
+            provider_invalid_fields=exc.safe_invalid_fields,
             provider_retry_allowed=exc.code in DEFINITIVE_RETRY_CODES,
         )
 
@@ -382,6 +392,7 @@ class SmokeOutcome:
     provider_status: int | None = None
     safe_reason_code: str | None = None
     exception_token: str | None = None
+    invalid_fields: tuple[str, ...] = ()
     provider_calls: int = 0
     recovered: bool = False
     retry_permitted: bool = False
@@ -431,9 +442,9 @@ def _load_gemini_config() -> GeminiImageConfig:
 
 def _category(
     exc: Exception, stage: str
-) -> tuple[SafeCategory, str | None, int | None, str | None, str | None]:
+) -> tuple[SafeCategory, str | None, int | None, str | None, str | None, tuple[str, ...]]:
     if isinstance(exc, SafeSmokeError):
-        return exc.category, None, None, None, None
+        return exc.category, None, None, None, None, ()
     if isinstance(exc, ImageNormalizationError):
         return (
             NORMALIZATION_CATEGORIES.get(exc.code, "SAFE_UNEXPECTED_FAILURE"),
@@ -441,6 +452,7 @@ def _category(
             None,
             exc.code.upper(),
             None,
+            (),
         )
     if isinstance(exc, GenerationProviderError):
         return (
@@ -449,10 +461,11 @@ def _category(
             exc.status_code,
             exc.safe_reason_code,
             exc.safe_exception_token,
+            exc.safe_invalid_fields,
         )
     if stage == "configuration_validation":
-        return "CONFIGURATION_ERROR", None, None, None, None
-    return "SAFE_UNEXPECTED_FAILURE", None, None, None, None
+        return "CONFIGURATION_ERROR", None, None, None, None, ()
+    return "SAFE_UNEXPECTED_FAILURE", None, None, None, None, ()
 
 
 def expected_request_payload(model: str, prompt: str) -> dict[str, Any]:
@@ -465,12 +478,17 @@ def expected_request_payload(model: str, prompt: str) -> dict[str, Any]:
             "mime_type": GEMINI_REQUEST_MIME_TYPE,
             "aspect_ratio": GEMINI_IMAGE_ASPECT_RATIO,
             "image_size": GEMINI_IMAGE_SIZE,
-            "delivery": GEMINI_IMAGE_DELIVERY,
         },
-        "stream": False,
-        "background": False,
-        "store": False,
     }
+
+
+def _request_fields_are_supported(payload: Mapping[str, Any]) -> bool:
+    """Reject any generic Interactions field the image model does not document."""
+    response_format = payload.get("response_format")
+    scopes: list[Mapping[str, Any]] = [payload]
+    if isinstance(response_format, Mapping):
+        scopes.append(response_format)
+    return not any(field in scope for scope in scopes for field in FORBIDDEN_REQUEST_FIELDS)
 
 
 def _retry_allowed(checkpoint: GeminiProviderCheckpoint) -> bool:
@@ -480,6 +498,16 @@ def _retry_allowed(checkpoint: GeminiProviderCheckpoint) -> bool:
         and checkpoint.provider_retry_allowed
         and checkpoint.provider_failure_code in DEFINITIVE_RETRY_CODES
         and checkpoint.prior_rejected_calls == 1
+        and checkpoint.source_sha256 is None
+        and checkpoint.source_path is None
+    )
+
+
+def _definitively_rejected(checkpoint: GeminiProviderCheckpoint) -> bool:
+    """A provider refusal that produced no bytes, whatever its retry budget."""
+    return bool(
+        checkpoint.operation_state == "provider_rejected"
+        and checkpoint.provider_failure_code in DEFINITIVE_RETRY_CODES
         and checkpoint.source_sha256 is None
         and checkpoint.source_path is None
     )
@@ -501,7 +529,37 @@ def classify_prior_checkpoint(
     if checkpoint.operation_state == "provider_call_started":
         # The submission outcome was never durably captured.
         return "ambiguous"
-    return "definitive_rejection" if _retry_allowed(checkpoint) else "ambiguous"
+    if _retry_allowed(checkpoint):
+        return "definitive_rejection"
+    if _definitively_rejected(checkpoint):
+        # The provider explicitly refused and produced nothing, but this
+        # operation has already spent its single authorized retry.
+        return "definitive_rejection_exhausted"
+    return "ambiguous"
+
+
+def archive_checkpoint(
+    store: CheckpointStore,
+    archive_directory: Path,
+    *,
+    prefix: str = ARCHIVE_PREFIX,
+    missing_category: SafeCategory = "NO_AMBIGUOUS_CHECKPOINT",
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> Path:
+    """Atomically move a preserved checkpoint aside, byte for byte.
+
+    The archived file keeps its original semantic state. It is never edited,
+    marked retryable, or discarded.
+    """
+    if not store.exists():
+        raise SafeSmokeError(missing_category)
+    timestamp = now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    archive_directory.mkdir(parents=True, exist_ok=True)
+    destination = archive_directory / f"{prefix}{timestamp}.json"
+    if destination.exists():
+        raise SafeSmokeError("SAFE_UNEXPECTED_FAILURE")
+    os.replace(store.path, destination)
+    return destination
 
 
 def archive_ambiguous_checkpoint(
@@ -510,20 +568,22 @@ def archive_ambiguous_checkpoint(
     *,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Path:
-    """Atomically move the ambiguous checkpoint aside, byte for byte.
+    return archive_checkpoint(store, archive_directory, now=now)
 
-    The archived file keeps its original semantic state. It is never edited,
-    marked retryable, or discarded.
-    """
-    if not store.exists():
-        raise SafeSmokeError("NO_AMBIGUOUS_CHECKPOINT")
-    timestamp = now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    archive_directory.mkdir(parents=True, exist_ok=True)
-    destination = archive_directory / f"{ARCHIVE_PREFIX}{timestamp}.json"
-    if destination.exists():
-        raise SafeSmokeError("SAFE_UNEXPECTED_FAILURE")
-    os.replace(store.path, destination)
-    return destination
+
+def archive_definitive_checkpoint(
+    store: CheckpointStore,
+    archive_directory: Path,
+    *,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> Path:
+    return archive_checkpoint(
+        store,
+        archive_directory,
+        prefix=DEFINITIVE_ARCHIVE_PREFIX,
+        missing_category="NO_DEFINITIVE_CHECKPOINT",
+        now=now,
+    )
 
 
 def _new_operation_id() -> str:
@@ -542,6 +602,8 @@ def _prepare_checkpoint(
         raise SafeSmokeError("CONFIGURATION_ERROR")
     if prior == "ambiguous":
         raise SafeSmokeError("AMBIGUOUS_PRIOR_SUBMISSION")
+    if prior == "definitive_rejection_exhausted":
+        raise SafeSmokeError("DEFINITIVE_REJECTION_NOT_AUTHORIZED")
     if prior == "definitive_rejection":
         if not allow_definitive_retry:
             raise SafeSmokeError("DEFINITIVE_REJECTION_NOT_AUTHORIZED")
@@ -552,6 +614,7 @@ def _prepare_checkpoint(
             provider_failure_status=None,
             provider_safe_reason_code=None,
             provider_exception_token=None,
+            provider_invalid_fields=(),
             provider_retry_allowed=False,
             current_stage=None,
         )
@@ -580,6 +643,7 @@ def execute_live(
     archive_directory: Path = DEFAULT_CHECKPOINT_ARCHIVE,
     allow_definitive_retry: bool = False,
     start_new_operation_after_ambiguous: bool = False,
+    start_new_operation_after_definitive: bool = False,
 ) -> SmokeOutcome:
     """Submit at most one Gemini generation request and persist safe state."""
     store = CheckpointStore(checkpoint_path, private_root)
@@ -609,12 +673,23 @@ def execute_live(
         payload = GeminiImageProvider.build_request_parameters(request)
         if payload != expected_request_payload(config.model, SMOKE_PROMPT):
             raise SafeSmokeError("INVALID_REQUEST")
+        if not _request_fields_are_supported(payload):
+            raise SafeSmokeError("INVALID_REQUEST")
         tracker.begin("prior_checkpoint_classification")
         prior = classify_prior_checkpoint(store, config)
+        tracker.begin("definitive_checkpoint_archival")
+        if start_new_operation_after_ambiguous and start_new_operation_after_definitive:
+            raise SafeSmokeError("CONFIGURATION_ERROR")
         if start_new_operation_after_ambiguous:
             if prior != "ambiguous":
                 raise SafeSmokeError("NO_AMBIGUOUS_CHECKPOINT")
             archive_ambiguous_checkpoint(store, archive_directory)
+            archived = True
+            prior = "none"
+        elif start_new_operation_after_definitive:
+            if prior not in DEFINITIVE_CLASSES:
+                raise SafeSmokeError("NO_DEFINITIVE_CHECKPOINT")
+            archive_definitive_checkpoint(store, archive_directory)
             archived = True
             prior = "none"
         tracker.begin("checkpoint_before_submission")
@@ -678,7 +753,7 @@ def execute_live(
             delivery_mode=final.delivery_mode,
         )
     except Exception as exc:
-        category, code, status, reason, token = _category(exc, tracker.current)
+        category, code, status, reason, token, fields = _category(exc, tracker.current)
         try:
             active = store.read() if store.exists() else None
         except SafeSmokeError:
@@ -696,6 +771,7 @@ def execute_live(
             provider_status=status,
             safe_reason_code=reason,
             exception_token=token,
+            invalid_fields=fields or (active.provider_invalid_fields if active else ()),
             provider_calls=calls,
             recovered=recovered,
             retry_permitted=active is not None and _retry_allowed(active),
@@ -713,17 +789,17 @@ def _print_outcome(outcome: SmokeOutcome) -> None:
         display_name = provider_model_display_name(GOOGLE_GEMINI_PROVIDER, outcome.config.model)
         print(f"provider model name: {display_name or 'UNDECLARED'}")
     print(f"generation endpoint: {GEMINI_INTERACTIONS_PATH}")
-    print(f"requested delivery: {GEMINI_IMAGE_DELIVERY}")
+    print("requested delivery: inline")
     print(f"requested source MIME: {GEMINI_REQUEST_MIME_TYPE}")
     print(f"sealed MIME: {SEALED_IMAGE_MIME_TYPE}")
     print("read-only model preflight: NOT PERFORMED (diagnostic-only)")
     print(f"operation id: {outcome.operation_id or 'UNAVAILABLE'}")
     print(f"prior checkpoint class: {outcome.prior_class or 'UNCLASSIFIED'}")
     print(f"new operator-authorized operation: {str(outcome.new_operation).lower()}")
-    print(f"{ARCHIVAL_STAGE}: {str(outcome.archived).lower()}")
+    print(f"prior checkpoint archived: {str(outcome.archived).lower()}")
     print(f"new generation requests: {outcome.provider_calls}")
     print(f"recovered from persisted bytes: {str(outcome.recovered).lower()}")
-    print(f"URI delivery used: {str(outcome.delivery_mode == GEMINI_IMAGE_DELIVERY).lower()}")
+    print(f"inline delivery used: {str(outcome.delivery_mode == 'inline').lower()}")
     print(f"provider source MIME: {outcome.source_mime_type or 'UNAVAILABLE'}")
     if outcome.image is not None:
         print(f"source byte size: {outcome.source_byte_size or len(outcome.image.data)}")
@@ -738,6 +814,10 @@ def _print_outcome(outcome: SmokeOutcome) -> None:
         print(f"provider HTTP status: {outcome.provider_status}")
     if outcome.safe_reason_code is not None:
         print(f"provider safe reason: {outcome.safe_reason_code}")
+    if outcome.safe_reason_code is not None:
+        print(f"PROVIDER_ERROR_STATUS={outcome.safe_reason_code}")
+    if outcome.invalid_fields:
+        print(f"PROVIDER_INVALID_FIELDS={','.join(outcome.invalid_fields)}")
     if outcome.exception_token is not None:
         print(f"provider exception class: {outcome.exception_token}")
     if outcome.category != "OK":
@@ -762,6 +842,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--start-new-operation-after-definitive",
+        action="store_true",
+        help=(
+            "Requires --live. Archive a preserved definitive provider rejection "
+            "and begin a brand-new operator-authorized operation. This is a NEW "
+            "billable generation, not a retry of the rejected submission."
+        ),
+    )
+    parser.add_argument(
         "--start-new-operation-after-ambiguous",
         action="store_true",
         help=(
@@ -775,22 +864,26 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.start_new_operation_after_ambiguous and not args.live:
-        print("ERROR: --start-new-operation-after-ambiguous requires --live.")
+    new_operation = (
+        args.start_new_operation_after_ambiguous or args.start_new_operation_after_definitive
+    )
+    if new_operation and not args.live:
+        print("ERROR: --start-new-operation-after-* requires --live.")
         print("INFO: zero network calls were made and no client was constructed.")
         return 1
     if not args.live:
         print("INFO: --live not supplied; zero network calls were made.")
         print("INFO: no Gemini client was constructed and no provider cost was incurred.")
         return INFORMATIONAL_EXIT_CODE
-    if args.start_new_operation_after_ambiguous:
+    if new_operation:
         print("NOTICE: starting a NEW operator-authorized Gemini operation.")
-        print("NOTICE: this is a new billable generation, not a retry of the ambiguous run.")
-        print("NOTICE: the previous ambiguous checkpoint is archived, never discarded.")
+        print("NOTICE: this is a NEW billable generation, not a retry of the prior run.")
+        print("NOTICE: the previous checkpoint is archived, never discarded.")
     load_dotenv(DEFAULT_ENV_FILE, override=False)
     outcome = execute_live(
         allow_definitive_retry=args.allow_definitive_retry,
         start_new_operation_after_ambiguous=args.start_new_operation_after_ambiguous,
+        start_new_operation_after_definitive=args.start_new_operation_after_definitive,
     )
     _print_outcome(outcome)
     return 0 if outcome.category == "OK" else 1

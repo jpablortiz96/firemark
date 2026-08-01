@@ -27,9 +27,8 @@ import scripts.smoke_multimodal_generate_and_seal as multimodal
 from api.firemark.control_plane.models import AssetRecord
 from api.firemark.generation.fake_provider import _TINY_JPEG, _TINY_PNG
 from api.firemark.generation.gemini_provider import (
-    DOCUMENTED_IMAGE_MIME_TYPES,
+    FORBIDDEN_REQUEST_FIELDS,
     GEMINI_API_BASE_URL,
-    GEMINI_API_HOST,
     GEMINI_INTERACTIONS_PATH,
     GEMINI_REQUEST_MIME_TYPE,
     GEMINI_SOURCE_MIME_TYPE,
@@ -77,27 +76,20 @@ def request(prompt: str = "private prompt") -> GenerationRequest:
     )
 
 
-IMAGE_URI = f"https://{GEMINI_API_HOST}/v1beta/files/generated-image:download"
-SIGNED_URI = "https://lh3.googleusercontent.com/firemark/generated-image"
-
-
 def interaction_body(
     *,
-    uri: str | None = IMAGE_URI,
     data: str | None = None,
     mime_type: str = "image/jpeg",
     status: str = "completed",
     use_steps: bool = False,
     image_blocks: int = 1,
 ) -> dict[str, object]:
-    """Build an interaction response. URI delivery is the default shape."""
-    image: dict[str, object] = {"type": "image", "mime_type": mime_type}
-    if data is not None:
-        image["data"] = data
-    elif uri is not None:
-        image["uri"] = uri
-    else:
-        image["data"] = base64.b64encode(_TINY_JPEG).decode()
+    """Build an interaction response carrying one inline Base64 JPEG."""
+    image: dict[str, object] = {
+        "type": "image",
+        "mime_type": mime_type,
+        "data": data if data is not None else base64.b64encode(_TINY_JPEG).decode(),
+    }
     body: dict[str, object] = {"id": "interaction-1", "object": "interaction", "status": status}
     if use_steps:
         body["steps"] = [
@@ -113,42 +105,7 @@ def interaction_body(
 
 
 def inline_body(**kwargs: Any) -> dict[str, object]:
-    """The defensive inline-Base64 shape used when a provider ignores delivery."""
-    kwargs.setdefault("data", base64.b64encode(_TINY_JPEG).decode())
-    return interaction_body(uri=None, **kwargs)
-
-
-def jpeg_download(
-    payload: bytes = _TINY_JPEG,
-    *,
-    content_type: str = "image/jpeg",
-    content_length: str | None = None,
-    status: int = 200,
-    location: str | None = None,
-) -> httpx.Response:
-    headers = {"content-type": content_type}
-    if location is not None:
-        headers["location"] = location
-    response = httpx.Response(status, headers=headers, content=payload)
-    if content_length is not None:
-        response.headers["content-length"] = content_length
-    return response
-
-
-class DownloadRecorder:
-    """Capture every download request so URI and header use can be asserted."""
-
-    def __init__(self, *responses: httpx.Response) -> None:
-        self.responses = list(responses)
-        self.requests: list[httpx.Request] = []
-
-    def __call__(self, http_request: httpx.Request) -> httpx.Response:
-        self.requests.append(http_request)
-        if not self.responses:
-            return jpeg_download()
-        return self.responses.pop(0)
-
-
+    return interaction_body(**kwargs)
 def client(handler: Any) -> httpx.Client:
     return httpx.Client(
         transport=httpx.MockTransport(handler),
@@ -160,19 +117,14 @@ def provider(
     handler: Any,
     *,
     secret: str = "test-gemini-secret",
-    download: Any = None,
     max_image_bytes: int = 1024 * 1024,
     stage_callback: Any = None,
 ) -> GeminiImageProvider:
-    downloader = download if download is not None else DownloadRecorder()
     return GeminiImageProvider(
         api_key=secret,
         timeout_seconds=30,
         max_image_bytes=max_image_bytes,
         client_factory=lambda: client(handler),
-        download_client_factory=lambda: httpx.Client(
-            transport=httpx.MockTransport(downloader)
-        ),
         now=lambda: NOW,
         stage_callback=stage_callback,
     )
@@ -257,21 +209,15 @@ def test_official_minimal_request_structure_uses_exact_configured_model() -> Non
                 "mime_type": "image/jpeg",
                 "aspect_ratio": "1:1",
                 "image_size": "1K",
-                "delivery": "uri",
             },
-            "stream": False,
-            "background": False,
-            "store": False,
         }
     ]
     payload = captured[0]
+    assert set(payload) == {"model", "input", "response_format"}
     assert payload["model"] == MODEL
-    assert payload["stream"] is False
-    assert payload["background"] is False
-    assert payload["store"] is False
     response_format = payload["response_format"]
     assert isinstance(response_format, dict)
-    assert response_format["delivery"] == "uri"
+    assert set(response_format) == {"type", "mime_type", "aspect_ratio", "image_size"}
     assert response_format["type"] == "image"
     assert response_format["mime_type"] == GEMINI_REQUEST_MIME_TYPE == "image/jpeg"
     assert response_format["aspect_ratio"] == "1:1"
@@ -302,10 +248,13 @@ def test_request_never_targets_gmi_cloud_or_another_provider() -> None:
     default = GeminiImageProvider(api_key="secret", timeout_seconds=5, max_image_bytes=1024)
     default_client = default._client()
     assert str(default_client.base_url) == GEMINI_API_BASE_URL
+    assert default_client.follow_redirects is False
     default_client.close()
     provider(handler).generate_image(request())
+    # Exactly one host is ever contacted: no second resource is downloaded.
     assert seen == [f"{GEMINI_API_BASE_URL}{GEMINI_INTERACTIONS_PATH}"]
     assert all(token not in url.lower() for url in seen for token in FORBIDDEN_HOSTS)
+    assert all(":generateContent" not in url for url in seen)
 
 
 def test_provider_size_is_recorded_but_never_sent() -> None:
@@ -314,7 +263,7 @@ def test_provider_size_is_recorded_but_never_sent() -> None:
         request().model_copy(update={"size": "1792x1024"})
     )
     assert first == second
-    assert set(first) == {"model", "input", "response_format", "stream", "background", "store"}
+    assert set(first) == {"model", "input", "response_format"}
 
 
 # --------------------------------------------------------------------------
@@ -360,9 +309,10 @@ def test_generated_image_reports_accurate_provider_identity() -> None:
         (interaction_body(use_steps=True, image_blocks=2), "malformed_response"),
         (inline_body(data="%%%"), "malformed_response"),
         (inline_body(data=""), "malformed_response"),
+        ({"status": "completed", "output_image": {"type": "image"}}, "malformed_response"),
         (inline_body(mime_type="image/png"), "unsupported_media_type"),
         (inline_body(mime_type="image/webp"), "unsupported_media_type"),
-        (inline_body(mime_type="application/json"), "malformed_response"),
+        (inline_body(mime_type="application/json"), "unsupported_media_type"),
         (inline_body(data=base64.b64encode(b"not-a-jpeg").decode()), "non_jpeg_source"),
         (interaction_body(status="failed"), "malformed_response"),
         (interaction_body(status="in_progress"), "malformed_response"),
@@ -398,7 +348,6 @@ def test_oversized_interaction_metadata_body_fails_closed() -> None:
             lambda _request: httpx.Response(200, json=padded), max_image_bytes=1024 * 1024
         ).generate_image(request())
     assert caught.value.code == "response_too_large"
-    assert caught.value.safe_reason_code == "INTERACTION_BODY_TOO_LARGE"
 
 
 def test_interaction_redirect_fails_closed() -> None:
@@ -583,19 +532,6 @@ def test_dns_and_transport_failures_are_distinguishable_from_http_5xx() -> None:
     assert server_error.value.status_code == 503
     assert server_error.value.safe_reason_code == "HTTP_503"
     assert server_error.value.safe_exception_token is None
-
-
-def test_download_transport_failures_are_classified_separately() -> None:
-    def failing_download(_request: httpx.Request) -> httpx.Response:
-        raise httpx.RemoteProtocolError("peer closed connection")
-
-    with pytest.raises(GenerationProviderError) as caught:
-        ok_provider(download=failing_download).generate_image(request())
-    assert caught.value.code == "unavailable"
-    assert caught.value.safe_reason_code == "TRANSPORT_REMOTE_PROTOCOL_FAILURE"
-    assert caught.value.safe_exception_token == "RemoteProtocolError"
-
-
 def test_exceptions_never_carry_prompt_key_or_raw_response() -> None:
     secret_prompt = "the private prompt that must never leak"
     raw = {"error": {"status": "INVALID_ARGUMENT", "message": "raw provider detail"}}
@@ -863,9 +799,6 @@ def test_preflight_failure_cannot_block_a_valid_generation(tmp_path: Path) -> No
             client_factory=lambda: client(
                 lambda _request: httpx.Response(200, json=interaction_body())
             ),
-            download_client_factory=lambda: httpx.Client(
-                transport=httpx.MockTransport(DownloadRecorder())
-            ),
             now=lambda: NOW,
             stage_callback=kwargs.get("stage_callback"),
         )
@@ -880,7 +813,11 @@ def test_preflight_failure_cannot_block_a_valid_generation(tmp_path: Path) -> No
     assert outcome.provider_calls == 1
     assert [stage for stage, _status in outcome.stages] == list(smoke.STAGES)
     assert "model_access_preflight" not in dict(outcome.stages)
-    assert smoke.STAGES[7:9] == ("jpeg_download", "jpeg_validation")
+    assert smoke.STAGES[6:9] == (
+        "inline_metadata_validation",
+        "inline_jpeg_base64_validation",
+        "jpeg_validation",
+    )
     assert smoke.STAGES[10:12] == (
         "deterministic_png_normalization",
         "normalized_png_validation",
@@ -924,6 +861,7 @@ def run_smoke(
     *,
     allow_definitive_retry: bool = False,
     start_new_operation_after_ambiguous: bool = False,
+    start_new_operation_after_definitive: bool = False,
 ) -> smoke.SmokeOutcome:
     return smoke.execute_live(
         config_loader=config,
@@ -933,6 +871,7 @@ def run_smoke(
         archive_directory=tmp_path / "archive",
         allow_definitive_retry=allow_definitive_retry,
         start_new_operation_after_ambiguous=start_new_operation_after_ambiguous,
+        start_new_operation_after_definitive=start_new_operation_after_definitive,
     )
 
 
@@ -1153,320 +1092,31 @@ def test_gemini_smoke_contacts_no_other_provider(monkeypatch: pytest.MonkeyPatch
 # --------------------------------------------------------------------------
 # URI delivery: parsing, security and bounded download
 # --------------------------------------------------------------------------
-
-
-def test_uri_delivery_is_the_default_and_downloads_through_a_separate_client() -> None:
-    recorder = DownloadRecorder(jpeg_download())
-    image = ok_provider(download=recorder).generate_image(request())
-    assert image.data == _TINY_JPEG
-    assert image.safe_generation_metadata["delivery"] == "uri"
-    assert image.safe_generation_metadata["aspect_ratio"] == "1:1"
-    assert image.safe_generation_metadata["image_size"] == "1K"
-    assert len(recorder.requests) == 1
-    assert str(recorder.requests[0].url) == IMAGE_URI
-    assert recorder.requests[0].method == "GET"
-
-
-def test_source_sha256_is_calculated_during_the_download() -> None:
-    recorder = DownloadRecorder(jpeg_download())
-    image = ok_provider(download=recorder).generate_image(request())
-    assert image.safe_generation_metadata["source_sha256"] == hashlib.sha256(_TINY_JPEG).hexdigest()
-
-
-def test_step_content_image_uri_is_parsed() -> None:
-    recorder = DownloadRecorder(jpeg_download())
-    image = provider(
-        lambda _request: httpx.Response(200, json=interaction_body(use_steps=True)),
-        download=recorder,
-    ).generate_image(request())
-    assert image.data == _TINY_JPEG
-    assert len(recorder.requests) == 1
-
-
-def test_inline_delivery_remains_a_defensive_fallback() -> None:
-    recorder = DownloadRecorder()
-    image = provider(
-        lambda _request: httpx.Response(200, json=inline_body()), download=recorder
-    ).generate_image(request())
-    assert image.data == _TINY_JPEG
-    assert image.safe_generation_metadata["delivery"] == "inline"
-    assert recorder.requests == []
-
-
-def test_api_key_is_sent_only_to_the_gemini_api_host() -> None:
-    gemini_host = DownloadRecorder(jpeg_download())
-    provider(
-        lambda _request: httpx.Response(200, json=interaction_body(uri=IMAGE_URI)),
-        download=gemini_host,
-    ).generate_image(request())
-    assert gemini_host.requests[0].headers["x-goog-api-key"] == "test-gemini-secret"
-
-    signed_host = DownloadRecorder(jpeg_download())
-    provider(
-        lambda _request: httpx.Response(200, json=interaction_body(uri=SIGNED_URI)),
-        download=signed_host,
-    ).generate_image(request())
-    assert "x-goog-api-key" not in signed_host.requests[0].headers
-    assert "authorization" not in signed_host.requests[0].headers
-
-
-@pytest.mark.parametrize(
-    ("uri", "reason"),
-    [
-        ("http://generativelanguage.googleapis.com/image.png", "IMAGE_URI_SCHEME_REJECTED"),
-        ("ftp://generativelanguage.googleapis.com/image.png", "IMAGE_URI_SCHEME_REJECTED"),
-        ("file:///etc/passwd", "IMAGE_URI_SCHEME_REJECTED"),
-        (
-            "https://user:secret@generativelanguage.googleapis.com/image.png",
-            "IMAGE_URI_CREDENTIALS_REJECTED",
-        ),
-        (f"https://{GEMINI_API_HOST}/image.png#fragment", "IMAGE_URI_FRAGMENT_REJECTED"),
-        (f"https://{GEMINI_API_HOST}/" + "a" * 2100, "IMAGE_URI_TOO_LONG"),
-        ("https://localhost/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://evil.localhost/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://127.0.0.1/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://[::1]/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://10.0.0.5/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://192.168.1.10/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://172.16.4.4/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://169.254.169.254/latest/meta-data", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://[fe80::1]/image.png", "IMAGE_URI_PRIVATE_HOST_REJECTED"),
-        ("https://attacker.example.com/image.png", "IMAGE_URI_HOST_REJECTED"),
-        ("https://googleapis.com.attacker.test/image.png", "IMAGE_URI_HOST_REJECTED"),
-        ("https://gmi-cloud.test/image.png", "IMAGE_URI_HOST_REJECTED"),
-        (f"https://{GEMINI_API_HOST}:notaport/image.png", "IMAGE_URI_MALFORMED"),
-    ],
-)
-def test_unsafe_image_uris_are_rejected_without_downloading(uri: str, reason: str) -> None:
-    recorder = DownloadRecorder()
-
-    def refuse(_request: httpx.Request) -> httpx.Response:
-        pytest.fail("an unsafe URI must never be downloaded")
-
-    with pytest.raises(GenerationProviderError) as caught:
-        provider(
-            lambda _request: httpx.Response(200, json=interaction_body(uri=uri)),
-            download=refuse,
-        ).generate_image(request())
-    assert caught.value.code == "malformed_response"
-    assert caught.value.safe_reason_code == reason
-    assert uri not in str(caught.value)
-    assert uri not in repr(caught.value)
-    assert recorder.requests == []
-
-
-@pytest.mark.parametrize(
-    "uri",
-    [
-        f"https://{GEMINI_API_HOST}/v1beta/files/x:download",
-        "https://storage.googleapis.com/bucket/generated.png",
-        "https://lh3.googleusercontent.com/firemark/generated",
-        "https://us-central1-aiplatform.googleapis.com/generated.png",
-    ],
-)
-def test_google_hosted_uris_are_accepted(uri: str) -> None:
-    recorder = DownloadRecorder(jpeg_download())
-    image = provider(
-        lambda _request: httpx.Response(200, json=interaction_body(uri=uri)), download=recorder
-    ).generate_image(request())
-    assert image.data == _TINY_JPEG
-    assert str(recorder.requests[0].url) == uri
-
-
-def test_missing_uri_and_missing_data_fails_closed() -> None:
-    body = {"status": "completed", "output_image": {"type": "image", "mime_type": "image/png"}}
-    with pytest.raises(GenerationProviderError) as caught:
-        provider(lambda _request: httpx.Response(200, json=body)).generate_image(request())
-    assert caught.value.safe_reason_code == "IMAGE_REFERENCE_MISSING"
-
-
-def test_second_redirect_is_rejected_and_first_is_validated() -> None:
-    single = DownloadRecorder(
-        jpeg_download(status=302, location=SIGNED_URI), jpeg_download()
-    )
-    image = provider(
-        lambda _request: httpx.Response(200, json=interaction_body()), download=single
-    ).generate_image(request())
-    assert image.data == _TINY_JPEG
-    assert [str(call.url) for call in single.requests] == [IMAGE_URI, SIGNED_URI]
-    assert "x-goog-api-key" in single.requests[0].headers
-    assert "x-goog-api-key" not in single.requests[1].headers
-
-    chained = DownloadRecorder(
-        jpeg_download(status=302, location=SIGNED_URI),
-        jpeg_download(status=302, location=SIGNED_URI),
-    )
-    with pytest.raises(GenerationProviderError) as caught:
-        provider(
-            lambda _request: httpx.Response(200, json=interaction_body()), download=chained
-        ).generate_image(request())
-    assert caught.value.safe_reason_code == "IMAGE_URI_REDIRECT_REJECTED"
-
-
-def test_redirect_to_an_unsafe_destination_is_rejected() -> None:
-    hostile = DownloadRecorder(jpeg_download(status=302, location="https://127.0.0.1/image.png"))
-    with pytest.raises(GenerationProviderError) as caught:
-        provider(
-            lambda _request: httpx.Response(200, json=interaction_body()), download=hostile
-        ).generate_image(request())
-    assert caught.value.safe_reason_code == "IMAGE_URI_PRIVATE_HOST_REJECTED"
-
-
-def test_redirect_without_a_location_is_rejected() -> None:
-    headerless = DownloadRecorder(jpeg_download(status=302))
-    with pytest.raises(GenerationProviderError) as caught:
-        provider(
-            lambda _request: httpx.Response(200, json=interaction_body()), download=headerless
-        ).generate_image(request())
-    assert caught.value.safe_reason_code == "IMAGE_URI_REDIRECT_REJECTED"
-
-
-@pytest.mark.parametrize(
-    ("response", "code", "reason"),
-    [
-        (
-            jpeg_download(content_type="image/png"),
-            "unsupported_media_type",
-            "PROVIDER_SOURCE_MIME_UNSUPPORTED",
-        ),
-        (
-            jpeg_download(content_type="image/webp"),
-            "unsupported_media_type",
-            "PROVIDER_SOURCE_MIME_UNSUPPORTED",
-        ),
-        (jpeg_download(content_type="text/html"), "malformed_response", "IMAGE_CONTENT_TYPE_REJECTED"),
-        (
-            jpeg_download(content_type="application/json"),
-            "malformed_response",
-            "IMAGE_CONTENT_TYPE_REJECTED",
-        ),
-        (jpeg_download(b"not-a-jpeg-at-all"), "unsupported_media_type", "NON_JPEG_SOURCE"),
-        (jpeg_download(_TINY_JPEG[:40]), "malformed_response", "MALFORMED_IMAGE"),
-        (
-            jpeg_download(content_length="9999"),
-            "malformed_response",
-            "IMAGE_DOWNLOAD_TRUNCATED",
-        ),
-        (
-            jpeg_download(content_length="invalid"),
-            "malformed_response",
-            "IMAGE_CONTENT_LENGTH_INVALID",
-        ),
-    ],
-)
-def test_download_responses_are_validated(
-    response: httpx.Response, code: str, reason: str | None
-) -> None:
-    with pytest.raises(GenerationProviderError) as caught:
-        ok_provider(download=DownloadRecorder(response)).generate_image(request())
-    assert caught.value.code == code
-    if reason is not None:
-        assert caught.value.safe_reason_code == reason
-
-
-def test_download_is_bounded_by_declared_and_streamed_size() -> None:
-    declared = jpeg_download(content_length=str(64 * 1024 * 1024))
-    with pytest.raises(GenerationProviderError) as by_header:
-        ok_provider(download=DownloadRecorder(declared), max_image_bytes=1024).generate_image(
-            request()
-        )
-    assert by_header.value.code == "response_too_large"
-
-    class LargeStream(httpx.SyncByteStream):
-        def __iter__(self) -> Any:
-            for _ in range(4):
-                yield b"x" * 4096
-
-    streamed = httpx.Response(
-        200, headers={"content-type": "image/jpeg"}, stream=LargeStream()
-    )
-    with pytest.raises(GenerationProviderError) as by_stream:
-        ok_provider(download=DownloadRecorder(streamed), max_image_bytes=1024).generate_image(
-            request()
-        )
-    assert by_stream.value.code == "response_too_large"
-
-
-def test_failed_download_status_is_classified() -> None:
-    with pytest.raises(GenerationProviderError) as caught:
-        ok_provider(
-            download=DownloadRecorder(httpx.Response(403, json={"error": {"status": "PERMISSION_DENIED"}}))
-        ).generate_image(request())
-    assert caught.value.code == "permission_denied"
-    assert caught.value.status_code == 403
-
-
-def test_documented_image_types_are_declared_once() -> None:
-    assert DOCUMENTED_IMAGE_MIME_TYPES == {"image/png", "image/jpeg", "image/webp"}
-
-
 # --------------------------------------------------------------------------
 # The transient URI never escapes the download operation
 # --------------------------------------------------------------------------
-
-
-def test_uri_is_absent_from_checkpoint_output_and_metadata(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    secret_uri = f"https://{GEMINI_API_HOST}/v1beta/files/private-token-abc123:download"
-
-    def factory(**kwargs: Any) -> GeminiImageProvider:
-        return provider(
-            lambda _request: httpx.Response(200, json=interaction_body(uri=secret_uri)),
-            download=DownloadRecorder(jpeg_download()),
-            stage_callback=kwargs.get("stage_callback"),
-        )
-
-    outcome = smoke.execute_live(
-        config_loader=config,
-        provider_factory=factory,
-        checkpoint_path=tmp_path / "checkpoint.json",
-        private_root=tmp_path / "private",
-        archive_directory=tmp_path / "archive",
-    )
-    assert outcome.category == "OK"
-    assert outcome.image is not None
-    smoke._print_outcome(outcome)
-    output = capsys.readouterr().out
-    stored = (tmp_path / "checkpoint.json").read_text("utf-8")
-    metadata = json.dumps(outcome.image.safe_generation_metadata)
-    for haystack in (output, stored, metadata):
-        assert secret_uri not in haystack
-        assert "private-token-abc123" not in haystack
-    assert "URI delivery used: true" in output
-
-
-def test_uri_never_appears_in_a_download_failure_exception() -> None:
-    secret_uri = f"https://{GEMINI_API_HOST}/v1beta/files/leak-token-xyz:download"
-
-    def failing(_request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadError("private transport detail")
-
-    with pytest.raises(GenerationProviderError) as caught:
-        provider(
-            lambda _request: httpx.Response(200, json=interaction_body(uri=secret_uri)),
-            download=failing,
-        ).generate_image(request())
-    rendered = f"{caught.value!r} {caught.value!s} {caught.value.args}"
-    assert secret_uri not in rendered
-    assert "leak-token-xyz" not in rendered
-    assert "private transport detail" not in rendered
-
-
 # --------------------------------------------------------------------------
 # Ambiguous checkpoint preservation and operator-authorized new operations
 # --------------------------------------------------------------------------
 
 
-def test_help_documents_the_new_operation_option() -> None:
+def test_help_documents_the_new_operation_options() -> None:
     help_text = " ".join(smoke.build_parser().format_help().split())
     assert "--start-new-operation-after-ambiguous" in help_text
+    assert "--start-new-operation-after-definitive" in help_text
     assert "not a retry of the ambiguous submission" in help_text
-    assert "Requires --live" in help_text
+    assert "not a retry of the rejected submission" in help_text
+    assert help_text.count("Requires --live") == 2
 
 
-def test_new_operation_option_requires_live(capsys: pytest.CaptureFixture[str]) -> None:
-    assert smoke.main(["--start-new-operation-after-ambiguous"]) == 1
+@pytest.mark.parametrize(
+    "option",
+    ["--start-new-operation-after-ambiguous", "--start-new-operation-after-definitive"],
+)
+def test_new_operation_options_require_live(
+    option: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert smoke.main([option]) == 1
     output = capsys.readouterr().out
     assert "requires --live" in output
     assert "zero network calls" in output
@@ -1621,22 +1271,6 @@ def test_persisted_failure_keeps_only_allowlisted_diagnostics(tmp_path: Path) ->
 def test_unlisted_exception_tokens_are_discarded() -> None:
     error = GenerationProviderError("unavailable", safe_exception_token="SomeInternalError")
     assert error.safe_exception_token is None
-
-
-def test_default_download_client_is_independent_and_non_redirecting() -> None:
-    instance = GeminiImageProvider(api_key="secret", timeout_seconds=45, max_image_bytes=1024)
-    download = instance._download_client()
-    interaction = instance._client()
-    assert download is not interaction
-    assert download.follow_redirects is False
-    assert str(interaction.base_url) == GEMINI_API_BASE_URL
-    assert download.timeout.read == 45.0
-    assert download.timeout.connect == 30.0
-    assert download.timeout.pool == 30.0
-    download.close()
-    interaction.close()
-
-
 def test_read_only_probe_bounds_use_the_shared_buffer() -> None:
     with pytest.raises(GenerationProviderError) as unreadable:
         provider(
@@ -1664,34 +1298,14 @@ def test_non_json_interaction_body_fails_closed() -> None:
             )
         ).generate_image(request())
     assert caught.value.code == "malformed_response"
-
-
-def test_blank_and_hostless_uris_are_rejected() -> None:
-    assert smoke  # module import guard keeps this test in the smoke suite
-    for uri, reason in (("", "IMAGE_URI_MISSING"), ("https:///image.png", "IMAGE_URI_HOST_MISSING")):
-        with pytest.raises(GenerationProviderError) as caught:
-            GeminiImageProvider._validated_image_uri(uri)
-        assert caught.value.safe_reason_code == reason
-
-
-def test_download_bound_is_enforced_before_the_body_is_read() -> None:
-    oversized = jpeg_download(content_length=str(4096))
-    with pytest.raises(GenerationProviderError) as caught:
-        ok_provider(
-            download=DownloadRecorder(oversized), max_image_bytes=1024
-        ).generate_image(request())
-    assert caught.value.code == "response_too_large"
-
-
 def test_provider_reported_stages_are_part_of_the_declared_stage_table() -> None:
     assert smoke.PROVIDER_STAGES <= set(smoke.STAGES)
     reported: list[str] = []
     ok_provider(stage_callback=reported.append).generate_image(request())
     assert reported == [
         "interaction_submission",
-        "interaction_metadata_validation",
-        "image_uri_validation",
-        "jpeg_download",
+        "inline_metadata_validation",
+        "inline_jpeg_base64_validation",
         "jpeg_validation",
     ]
 
@@ -2172,3 +1786,510 @@ def test_generate_and_seal_rejects_a_non_png_normalized_carrier(
     with pytest.raises(generate_and_seal.GenerateAndSealError) as caught:
         generate_and_seal._png_carrier(image, stage_callback=lambda _stage: None)
     assert caught.value.code == "IMAGE_NORMALIZATION_NON_PNG_NORMALIZED_OUTPUT"
+
+
+# --------------------------------------------------------------------------
+# Minimal inline request contract
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "delivery",
+        "stream",
+        "background",
+        "store",
+        "response_modalities",
+        "responseModalities",
+        "generationConfig",
+        "generation_config",
+        "tools",
+        "previous_interaction_id",
+        "contents",
+    ],
+)
+def test_generic_schema_fields_are_never_sent(field: str) -> None:
+    """Only the fields the image model's own examples use may be submitted."""
+    captured: list[bytes] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        captured.append(http_request.content)
+        return httpx.Response(200, json=interaction_body())
+
+    provider(handler).generate_image(request())
+    payload = json.loads(captured[0])
+    assert field not in payload
+    assert field not in payload["response_format"]
+    assert field in FORBIDDEN_REQUEST_FIELDS
+    assert field.encode() not in captured[0]
+
+
+def test_request_headers_disable_content_encoding() -> None:
+    seen: list[httpx.Headers] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request.headers)
+        return httpx.Response(200, json=interaction_body())
+
+    provider(handler).generate_image(request())
+    headers = seen[0]
+    assert headers["accept-encoding"] == "identity"
+    assert headers["accept"] == "application/json"
+    assert headers["content-type"].startswith("application/json")
+    assert headers["x-goog-api-key"] == "test-gemini-secret"
+    assert "authorization" not in headers
+
+
+def test_forbidden_field_guard_rejects_a_reintroduced_field() -> None:
+    assert smoke._request_fields_are_supported(
+        smoke.expected_request_payload(MODEL, "prompt")
+    )
+    with_delivery = smoke.expected_request_payload(MODEL, "prompt")
+    response_format = with_delivery["response_format"]
+    assert isinstance(response_format, dict)
+    response_format["delivery"] = "uri"
+    assert not smoke._request_fields_are_supported(with_delivery)
+    with_stream = smoke.expected_request_payload(MODEL, "prompt")
+    with_stream["stream"] = False
+    assert not smoke._request_fields_are_supported(with_stream)
+
+
+def test_exactly_one_request_and_no_second_resource_is_fetched() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        calls.append(http_request)
+        return httpx.Response(200, json=interaction_body())
+
+    image = provider(handler).generate_image(request())
+    assert image.data == _TINY_JPEG
+    assert len(calls) == 1
+    assert calls[0].method == "POST"
+    assert calls[0].url.path == GEMINI_INTERACTIONS_PATH
+
+
+# --------------------------------------------------------------------------
+# Bounded streamed JSON body
+# --------------------------------------------------------------------------
+
+
+def test_truncated_json_body_fails_closed() -> None:
+    partial = json.dumps(interaction_body())[:-40].encode()
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(
+            lambda _request: httpx.Response(
+                200, headers={"content-type": "application/json"}, content=partial
+            )
+        ).generate_image(request())
+    assert caught.value.code == "malformed_response"
+    assert caught.value.safe_reason_code == "INTERACTION_BODY_NOT_JSON"
+
+
+def test_streamed_json_body_is_bounded_without_content_length() -> None:
+    class Endless(httpx.SyncByteStream):
+        def __iter__(self) -> Any:
+            for _ in range(6):
+                yield b"{" + b"x" * (1024 * 1024)
+
+    bounded = provider(
+        lambda _request: httpx.Response(200, stream=Endless()), max_image_bytes=1024 * 1024
+    )
+    with pytest.raises(GenerationProviderError) as caught:
+        bounded.generate_image(request())
+    assert caught.value.code == "response_too_large"
+
+
+def test_read_failure_while_streaming_the_body_is_classified() -> None:
+    class Failing(httpx.SyncByteStream):
+        def __iter__(self) -> Any:
+            yield b'{"status":'
+            raise httpx.RemoteProtocolError("peer closed mid body")
+
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(lambda _request: httpx.Response(200, stream=Failing())).generate_image(
+            request()
+        )
+    assert caught.value.code == "unavailable"
+    assert caught.value.safe_reason_code == "TRANSPORT_REMOTE_PROTOCOL_FAILURE"
+    assert caught.value.safe_exception_token == "RemoteProtocolError"
+    assert "peer closed mid body" not in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# Safe structured Google error details
+# --------------------------------------------------------------------------
+
+
+def bad_request_body(
+    *,
+    status: str = "INVALID_ARGUMENT",
+    message: str = "private provider explanation",
+    fields: list[str] | None = None,
+    description: str = "private violation description",
+) -> dict[str, object]:
+    violations = [{"field": field, "description": description} for field in (fields or [])]
+    return {
+        "error": {
+            "code": 400,
+            "message": message,
+            "status": status,
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": violations,
+                }
+            ],
+        }
+    }
+
+
+def test_error_status_and_invalid_fields_are_extracted_safely() -> None:
+    body = bad_request_body(fields=["response_format.delivery", "response_format.image_size"])
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(lambda _request: httpx.Response(400, json=body)).generate_image(
+            request("private prompt text")
+        )
+    assert caught.value.code == "invalid_request"
+    assert caught.value.status_code == 400
+    assert caught.value.safe_reason_code == "INVALID_ARGUMENT"
+    assert caught.value.safe_invalid_fields == (
+        "response_format.delivery",
+        "response_format.image_size",
+    )
+
+
+def test_error_message_and_raw_body_are_never_retained(tmp_path: Path) -> None:
+    body = bad_request_body(fields=["response_format.delivery"])
+    error = GenerationProviderError("invalid_request")
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(lambda _request: httpx.Response(400, json=body)).generate_image(
+            request("private prompt text")
+        )
+    error = caught.value
+    rendered = f"{error!r} {error!s} {error.args} {error.__dict__}"
+    for secret in (
+        "private provider explanation",
+        "private violation description",
+        "private prompt text",
+        "test-gemini-secret",
+        json.dumps(body),
+    ):
+        assert secret not in rendered
+
+    outcome = run_smoke(tmp_path, CountingProvider(error))
+    stored = (tmp_path / "checkpoint.json").read_text("utf-8")
+    for secret in (
+        "private provider explanation",
+        "private violation description",
+        smoke.SMOKE_PROMPT,
+        "test-gemini-secret",
+    ):
+        assert secret not in stored
+    assert json.loads(stored)["provider_invalid_fields"] == ["response_format.delivery"]
+    assert outcome.invalid_fields == ("response_format.delivery",)
+
+
+def test_safe_error_output_names_the_status_and_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    failure = GenerationProviderError(
+        "invalid_request",
+        status_code=400,
+        safe_reason_code="INVALID_ARGUMENT",
+        safe_invalid_fields=("response_format.delivery",),
+    )
+    outcome = run_smoke(tmp_path, CountingProvider(failure))
+    smoke._print_outcome(outcome)
+    output = capsys.readouterr().out
+    assert "PROVIDER_ERROR_STATUS=INVALID_ARGUMENT" in output
+    assert "PROVIDER_INVALID_FIELDS=response_format.delivery" in output
+    assert "provider HTTP status: 400" in output
+    assert smoke.SMOKE_PROMPT not in output
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "field with spaces",
+        "field\nwith\nnewlines",
+        "x" * 200,
+        "",
+        "field;DROP TABLE",
+        "../../etc/passwd",
+        "<script>alert(1)</script>",
+    ],
+)
+def test_malicious_field_paths_are_discarded(field: str) -> None:
+    body = bad_request_body(fields=[field])
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(lambda _request: httpx.Response(400, json=body)).generate_image(request())
+    assert caught.value.safe_invalid_fields == ()
+
+
+@pytest.mark.parametrize(
+    "status", ["invalid argument", "x" * 100, "", "A;B", "STATUS/SLASH"]
+)
+def test_malformed_error_status_is_discarded(status: str) -> None:
+    body = bad_request_body(status=status, fields=[])
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(lambda _request: httpx.Response(400, json=body)).generate_image(request())
+    assert caught.value.safe_reason_code == "HTTP_400"
+
+
+def test_no_field_name_is_invented_when_google_supplies_none() -> None:
+    for body in (
+        bad_request_body(fields=[]),
+        {"error": {"status": "INVALID_ARGUMENT", "message": "no details"}},
+        {"error": {"status": "INVALID_ARGUMENT", "details": "not-a-list"}},
+        {"error": {"status": "INVALID_ARGUMENT", "details": [{"@type": "other.Type"}]}},
+        {
+            "error": {
+                "status": "INVALID_ARGUMENT",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.BadRequest",
+                        "fieldViolations": "invalid",
+                    }
+                ],
+            }
+        },
+        {
+            "error": {
+                "status": "INVALID_ARGUMENT",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.BadRequest",
+                        "fieldViolations": ["not-a-dict", {"description": "no field"}],
+                    }
+                ],
+            }
+        },
+    ):
+        with pytest.raises(GenerationProviderError) as caught:
+            provider(lambda _request, b=body: httpx.Response(400, json=b)).generate_image(
+                request()
+            )
+        assert caught.value.safe_invalid_fields == ()
+        assert caught.value.safe_reason_code == "INVALID_ARGUMENT"
+
+
+def test_snake_case_field_violations_are_supported_and_bounded() -> None:
+    many = [f"response_format.field_{index}" for index in range(40)]
+    body = {
+        "error": {
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "field_violations": [{"field": field} for field in many],
+                }
+            ],
+        }
+    }
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(lambda _request: httpx.Response(400, json=body)).generate_image(request())
+    assert len(caught.value.safe_invalid_fields) == 16
+    assert caught.value.safe_invalid_fields[0] == "response_format.field_0"
+
+
+def test_unlisted_field_paths_are_dropped_by_the_error_type() -> None:
+    error = GenerationProviderError(
+        "invalid_request", safe_invalid_fields=("ok.path", "bad path", 42)  # type: ignore[arg-type]
+    )
+    assert error.safe_invalid_fields == ("ok.path",)
+
+
+# --------------------------------------------------------------------------
+# Definitive rejection: preservation and a new authorized operation
+# --------------------------------------------------------------------------
+
+
+def definitive_store(tmp_path: Path, *, rejections: int = 2) -> smoke.CheckpointStore:
+    """Reproduce the live checkpoint: a definitive HTTP 400 with no bytes."""
+    store = smoke.CheckpointStore(tmp_path / "checkpoint.json", tmp_path / "private")
+    store.write(
+        smoke.GeminiProviderCheckpoint(
+            operation_state="provider_rejected",
+            operation_id="firemark-gemini-op-b4295a0602be4ee2ac74fb9cc90af51b",
+            model=MODEL,
+            request_id=smoke.SMOKE_REQUEST_ID,
+            created_at=NOW,
+            new_provider_calls=1,
+            prior_rejected_calls=rejections,
+            provider_failure_code="invalid_request",
+            provider_failure_status=400,
+            provider_safe_reason_code="HTTP_400",
+            provider_retry_allowed=True,
+        )
+    )
+    return store
+
+
+def test_second_definitive_rejection_is_classified_as_exhausted(tmp_path: Path) -> None:
+    store = definitive_store(tmp_path)
+    assert smoke.classify_prior_checkpoint(store, config()) == "definitive_rejection_exhausted"
+    assert not smoke._retry_allowed(store.read())
+    assert smoke.classify_prior_checkpoint(
+        definitive_store(tmp_path, rejections=1), config()
+    ) == "definitive_rejection"
+
+
+def test_exhausted_definitive_checkpoint_blocks_and_is_never_rewritten(tmp_path: Path) -> None:
+    store = definitive_store(tmp_path)
+    original = store.path.read_bytes()
+    blocked = CountingProvider(generated_image())
+    outcome = run_smoke(tmp_path, blocked, allow_definitive_retry=True)
+    assert outcome.category == "DEFINITIVE_REJECTION_NOT_AUTHORIZED"
+    assert blocked.calls == 0
+    assert store.path.read_bytes() == original
+
+
+def test_definitive_option_archives_atomically_and_starts_one_new_operation(
+    tmp_path: Path,
+) -> None:
+    store = definitive_store(tmp_path)
+    original = store.path.read_bytes()
+    counting = CountingProvider(generated_image())
+    outcome = run_smoke(tmp_path, counting, start_new_operation_after_definitive=True)
+    assert outcome.category == "OK"
+    assert outcome.new_operation is True and outcome.archived is True
+    assert counting.calls == 1
+
+    archived = sorted((tmp_path / "archive").glob(f"{smoke.DEFINITIVE_ARCHIVE_PREFIX}*.json"))
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == original
+    preserved = json.loads(archived[0].read_text("utf-8"))
+    assert preserved["operation_state"] == "provider_rejected"
+    assert preserved["provider_failure_status"] == 400
+    assert preserved["prior_rejected_calls"] == 2
+
+    assert outcome.operation_id is not None
+    assert outcome.operation_id != "firemark-gemini-op-b4295a0602be4ee2ac74fb9cc90af51b"
+    assert outcome.operation_id.startswith("firemark-gemini-op-")
+
+    again = CountingProvider(generated_image())
+    assert run_smoke(tmp_path, again).category == "OK"
+    assert again.calls == 0
+
+
+def test_a_second_definitive_failure_closes_the_new_operation(tmp_path: Path) -> None:
+    definitive_store(tmp_path)
+    failure = GenerationProviderError(
+        "invalid_request", status_code=400, safe_reason_code="INVALID_ARGUMENT"
+    )
+    first = run_smoke(
+        tmp_path, CountingProvider(failure), start_new_operation_after_definitive=True
+    )
+    assert first.category == "INVALID_REQUEST"
+    blocked = CountingProvider(generated_image())
+    assert run_smoke(tmp_path, blocked).category == "DEFINITIVE_REJECTION_NOT_AUTHORIZED"
+    assert blocked.calls == 0
+    second = run_smoke(tmp_path, CountingProvider(failure), allow_definitive_retry=True)
+    assert second.category == "INVALID_REQUEST"
+    exhausted = CountingProvider(generated_image())
+    assert run_smoke(tmp_path, exhausted).category == "DEFINITIVE_REJECTION_NOT_AUTHORIZED"
+    assert exhausted.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("builder", "category"),
+    [
+        ("ambiguous", "NO_DEFINITIVE_CHECKPOINT"),
+        ("none", "NO_DEFINITIVE_CHECKPOINT"),
+        ("recoverable", "NO_DEFINITIVE_CHECKPOINT"),
+    ],
+)
+def test_definitive_option_refuses_every_other_state(
+    tmp_path: Path, builder: str, category: str
+) -> None:
+    if builder == "ambiguous":
+        ambiguous_store(tmp_path)
+    elif builder == "recoverable":
+        assert run_smoke(tmp_path, CountingProvider(generated_image())).category == "OK"
+    counting = CountingProvider(generated_image())
+    outcome = run_smoke(tmp_path, counting, start_new_operation_after_definitive=True)
+    assert outcome.category == category
+    assert counting.calls == 0
+
+
+def test_definitive_option_refuses_a_configuration_mismatch(tmp_path: Path) -> None:
+    definitive_store(tmp_path)
+    counting = CountingProvider(generated_image())
+    outcome = smoke.execute_live(
+        config_loader=lambda: config().model_copy(update={"model": "gemini-3-pro-image"}),
+        provider_factory=lambda **_kwargs: counting,  # type: ignore[arg-type,return-value]
+        checkpoint_path=tmp_path / "checkpoint.json",
+        private_root=tmp_path / "private",
+        archive_directory=tmp_path / "archive",
+        start_new_operation_after_definitive=True,
+    )
+    assert outcome.category == "NO_DEFINITIVE_CHECKPOINT"
+    assert counting.calls == 0
+    assert not (tmp_path / "archive").exists()
+
+
+def test_ambiguous_checkpoint_cannot_use_the_definitive_option(tmp_path: Path) -> None:
+    store = ambiguous_store(tmp_path)
+    original = store.path.read_bytes()
+    counting = CountingProvider(generated_image())
+    outcome = run_smoke(tmp_path, counting, start_new_operation_after_definitive=True)
+    assert outcome.category == "NO_DEFINITIVE_CHECKPOINT"
+    assert counting.calls == 0
+    assert store.path.read_bytes() == original
+
+
+def test_both_new_operation_options_together_are_refused(tmp_path: Path) -> None:
+    definitive_store(tmp_path)
+    counting = CountingProvider(generated_image())
+    outcome = smoke.execute_live(
+        config_loader=config,
+        provider_factory=lambda **_kwargs: counting,  # type: ignore[arg-type,return-value]
+        checkpoint_path=tmp_path / "checkpoint.json",
+        private_root=tmp_path / "private",
+        archive_directory=tmp_path / "archive",
+        start_new_operation_after_ambiguous=True,
+        start_new_operation_after_definitive=True,
+    )
+    assert outcome.category == "CONFIGURATION_ERROR"
+    assert counting.calls == 0
+
+
+def test_definitive_archive_never_overwrites_or_deletes(tmp_path: Path) -> None:
+    store = definitive_store(tmp_path)
+    archive = tmp_path / "archive"
+    fixed = datetime(2026, 8, 2, 9, tzinfo=UTC)
+    first = smoke.archive_definitive_checkpoint(store, archive, now=lambda: fixed)
+    assert first.name.startswith(smoke.DEFINITIVE_ARCHIVE_PREFIX)
+    assert not store.exists()
+    definitive_store(tmp_path)
+    with pytest.raises(smoke.SafeSmokeError) as caught:
+        smoke.archive_definitive_checkpoint(store, archive, now=lambda: fixed)
+    assert caught.value.category == "SAFE_UNEXPECTED_FAILURE"
+    assert first.read_bytes()
+    assert store.exists()
+
+
+def test_definitive_archive_requires_an_existing_checkpoint(tmp_path: Path) -> None:
+    store = smoke.CheckpointStore(tmp_path / "missing.json", tmp_path / "private")
+    with pytest.raises(smoke.SafeSmokeError) as caught:
+        smoke.archive_definitive_checkpoint(store, tmp_path / "archive")
+    assert caught.value.category == "NO_DEFINITIVE_CHECKPOINT"
+
+
+def test_non_object_error_details_are_skipped() -> None:
+    body = {
+        "error": {
+            "status": "INVALID_ARGUMENT",
+            "details": [
+                "not-a-dict",
+                {
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": [{"field": "response_format.delivery"}],
+                },
+            ],
+        }
+    }
+    with pytest.raises(GenerationProviderError) as caught:
+        provider(lambda _request: httpx.Response(400, json=body)).generate_image(request())
+    assert caught.value.safe_invalid_fields == ("response_format.delivery",)

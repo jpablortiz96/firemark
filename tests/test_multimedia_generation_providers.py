@@ -127,7 +127,7 @@ def test_gemini_default_client_and_transport_failures_are_safe() -> None:
     ("response", "code"),
     [
         (httpx.Response(302), "malformed_response"),
-        (httpx.Response(200, json=_gemini_body(mime_type="text/html")), "malformed_response"),
+        (httpx.Response(200, json=_gemini_body(mime_type="text/html")), "unsupported_media_type"),
         (httpx.Response(200, json={"status": "completed", "output_image": {"type": "image"}}), "malformed_response"),
         (httpx.Response(200, json={}), "malformed_response"),
         (httpx.Response(200, json={"steps": [None]}), "malformed_response"),
