@@ -78,11 +78,17 @@ export function CertificateCard({ certificate }: { certificate: PublicCertificat
       </details>
 
       <div className="certificate-actions">
+        {/* The CTA carries only the public certificate ID and the media mode.
+            No hash, token or delivery URL: the local file is the evidence. */}
         <Link
           className="button button-primary"
-          href={`/verify?cert_id=${encodeURIComponent(certificate.cert_id)}&sha256=${certificate.sealed_sha256}`}
+          href={
+            certificate.media_type === "audio"
+              ? `/verify?cert_id=${encodeURIComponent(certificate.cert_id)}&media=audio`
+              : `/verify?cert_id=${encodeURIComponent(certificate.cert_id)}&media=image`
+          }
         >
-          Verify this asset
+          {certificate.media_type === "audio" ? "Verify this MP3 locally" : "Verify this asset"}
         </Link>
         <a
           className="button button-secondary"

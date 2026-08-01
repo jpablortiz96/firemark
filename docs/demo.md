@@ -63,7 +63,9 @@ This is the line most provenance demos skip. It is the one worth stopping on.
 
 <https://firemark-web.vercel.app/verify>
 
-Drop a sealed PNG. Watch it resolve **in the browser**:
+FIREMARK Lens is multimodal. Pick the medium, then drop the file.
+
+**Image · PNG** — drop a sealed PNG and watch it resolve **in the browser**:
 
 1. File format parsed locally
 2. Embedded capsule extracted from the PNG `tEXt` chunk
@@ -74,9 +76,23 @@ Drop a sealed PNG. Watch it resolve **in the browser**:
 7. B2 custody reference confirmed
 8. Delivery eligibility resolved
 
-Only `{cert_id, presented_sha256}` ever leaves the browser. The file does not.
+<img src="assets/screenshots/verify-image.webp" alt="FIREMARK Lens in Image / PNG mode" width="100%">
 
-<img src="assets/screenshots/verify.webp" alt="FIREMARK verification page" width="100%">
+**Audio · MP3** — from the audio certificate, click **Verify this MP3 locally**. The mode is
+selected and the certificate ID is prefilled from the URL; nothing is claimed until you choose the
+file. There is no embedded capsule, so Lens proves a different chain:
+
+1. Local processing — bytes stayed on this device
+2. MP3 format — ID3 tag or MPEG frame sync found in the bytes themselves
+3. Public certificate — retrieved by certificate ID
+4. Media contract — the certificate really represents `audio/mpeg`
+5. Byte-preserving seal — `source_sha256` equals `sealed_sha256`
+6. Local file hash — the browser's SHA-256 matches the certificate
+7. Cryptographic verification — the public Verify Gate accepted the evidence
+
+<img src="assets/screenshots/verify-audio.webp" alt="FIREMARK Lens in Audio / MP3 mode with the certificate ID prefilled" width="100%">
+
+Only `{cert_id, presented_sha256}` ever leaves the browser. The file does not.
 
 ---
 
@@ -98,8 +114,8 @@ with no capsule at all: Lens stops locally and never calls the API.
   editing the row changes nothing.
 - **"Object Lock COMPLIANCE, proved by read-back."** Enabling Object Lock is not evidence; reading
   retention back from B2 and re-downloading the exact `VersionId` is.
-- **"It says `NOT CHECKED` when it can't prove something."** Audio has no embedded capsule, and the
-  UI admits it.
+- **"Verification is honest per medium."** Audio has no embedded capsule, so Lens proves the media
+  contract and the byte-preserving hash relationship instead of pretending a capsule exists.
 - **"One provider call, ever."** Recovery-safe checkpoints mean an interrupted run resumes from
   persisted bytes instead of re-billing a provider.
 
@@ -134,7 +150,9 @@ Open `http://127.0.0.1:8000/docs` for the live OpenAPI surface.
 
 ## Reproducing the screenshots
 
-Every image on this page is captured from production, not mocked:
+Every image on this page is a real capture, never a mock. Production pages come from the live
+site; a screen that has shipped in this repository but is not yet deployed is captured from a local
+dev server and labelled `"source": "preview"`:
 
 ```bash
 cd web
@@ -142,8 +160,16 @@ npm run capture:readme -- --origin https://firemark-web.vercel.app
 ```
 
 The script performs public GET navigation only. It sends no bearer token, no provider key and no
-signed URL, and records HTTP status, viewport, SHA-256 and byte size for each capture in
+signed URL, and records HTTP status, viewport, SHA-256, byte size and the capture source in
 [`docs/assets/screenshots/manifest.json`](assets/screenshots/manifest.json).
+
+Screens that are implemented but not yet deployed are captured from a local dev server and marked
+`"source": "preview"` in the manifest, rather than published as a production page that lacks the
+feature:
+
+```bash
+npm run capture:readme -- --origin https://firemark-web.vercel.app --preview-origin http://127.0.0.1:3000
+```
 
 ---
 

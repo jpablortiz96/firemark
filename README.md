@@ -118,8 +118,8 @@ Real screenshots from the deployed production site. Not mockups.
 <table>
 <tr>
 <td width="50%" valign="top">
-<img src="docs/assets/screenshots/verify.webp" alt="FIREMARK verification page where a file is checked locally before any network call" width="100%">
-<p align="center"><em>Verify Gate — the decision that stands between an asset and its delivery.</em></p>
+<img src="docs/assets/screenshots/verify-audio.webp" alt="FIREMARK Lens in Audio · MP3 mode, with the certificate ID prefilled and an empty MP3 drop zone" width="100%">
+<p align="center"><em>FIREMARK Lens is multimodal: PNG reads its embedded capsule, MP3 uses a certificate ID and a local SHA-256.</em></p>
 </td>
 <td width="50%" valign="top" align="center">
 <img src="docs/assets/screenshots/landing-mobile.webp" alt="FIREMARK production landing page rendered on a 390 by 844 mobile viewport" width="46%">
@@ -172,7 +172,7 @@ can rewrite — is the hard part.
 | **Custody** | Two separately credentialed private Backblaze B2 buckets; the vault under Object Lock COMPLIANCE. |
 | **Control-plane DB** | Supabase: six RLS tables, a service-role-only atomic registration RPC, a safe allowlisted public projection RPC. |
 | **Public verification** | Public certificate, Verify Gate, authorized delivery, Proof Packs. |
-| **Local verification** | FIREMARK Lens — PNG chunk parsing and Web Crypto hashing entirely in the browser. |
+| **Local verification** | FIREMARK Lens — multimodal. PNG capsule parsing and MP3 hashing, both entirely in the browser. |
 
 Full component detail, sequence diagrams and trust boundaries: **[docs/architecture.md](docs/architecture.md)**.
 
@@ -194,8 +194,9 @@ A sealed PNG carries its own proof and can be verified from the file alone.
 
 **Audio** — MP3 sealing is explicitly **byte-preserving**. No fake capsule is injected, so
 `source_sha256 == sealed_sha256` by design. Verification uses the public `cert_id` plus a locally
-computed SHA-256, and FIREMARK Lens marks the embedded-capsule layer `NOT CHECKED` rather than
-implying a proof it does not have.
+computed SHA-256. FIREMARK Lens never claims an embedded capsule for audio: it checks the media
+contract, proves the byte-preserving hash relationship from the certificate, and only then asks the
+Verify Gate.
 
 The capsule also deliberately **excludes** `sealed_sha256` — embedding a hash of the file into
 the file would create a circular dependency. It carries `source_sha256`, `canonical_hash`, the
@@ -376,7 +377,7 @@ forbidden markers.
 1. **Open** [firemark-web.vercel.app](https://firemark-web.vercel.app) — the product states its own contract.
 2. **Inspect** the [Gemini Birth Certificate](https://firemark-web.vercel.app/certificate/firemark-cert-977dce1a6b5b7add352854900ddac911) — certificate ID, both hashes, canonical hash, signer key ID, status.
 3. **Compare** it with the [ElevenLabs certificate](https://firemark-web.vercel.app/certificate/firemark-cert-e0c6fbf7bfc482f765c636963cfcbbbf) — same structure, different hash contract.
-4. **Verify** at [/verify](https://firemark-web.vercel.app/verify) — drop a sealed PNG and watch the layers resolve locally.
+4. **Verify** at [/verify](https://firemark-web.vercel.app/verify) — pick **Image · PNG** or **Audio · MP3**, drop the file and watch the layers resolve locally.
 5. **Tamper** — flip one byte and watch delivery get blocked.
 6. **Download a Proof Pack** — public certificate, Ed25519 public key, offline QR, instructions. No media, no bearer, no presigned URL.
 

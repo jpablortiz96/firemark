@@ -114,9 +114,14 @@ the private zone.
 
 ## Local verification behaviour
 
-FIREMARK Lens runs entirely in the browser. The selected bytes, filename, local path and computed
-evidence are never uploaded, logged or persisted. Only `{cert_id, presented_sha256}` reaches the
-public Verify API.
+FIREMARK Lens runs entirely in the browser for both supported media. The selected bytes, filename,
+local path and computed evidence are never uploaded, logged or persisted. Exactly two values leave
+the browser: the public **certificate ID** and the locally computed **SHA-256**. No file bytes,
+Base64, `ArrayBuffer`, `Blob`, `File`, `FormData` or multipart body is ever constructed, and an
+optional MP3 preview uses a local object URL that is revoked when the file changes and on unmount.
+
+A `sha256` query parameter is never treated as verification evidence — the local file is the only
+source of truth.
 
 Lens reports eight independent layers: file format, embedded capsule, sealed hash, certificate
 presence, Ed25519 signature, certificate status, B2 custody reference and delivery eligibility.
@@ -125,9 +130,17 @@ presence, Ed25519 signature, certificate status, B2 custody reference and delive
   `FiremarkPublicCapsuleV1` canonical `tEXt` payload and computes the full-file SHA-256 through Web
   Crypto (Web Worker where available, main-thread fallback). A missing or malformed capsule stops
   the flow **before any API call**.
-- **MP3.** Accepts bounded MP3 files, validates and hashes locally, and requires the user to supply
-  the public `cert_id`. The embedded-capsule layer is marked **`NOT CHECKED`** — Lens does not imply
-  a proof that does not exist.
+- **MP3.** Accepts bounded MP3 files up to 50 MiB. The MP3 structure is proved from the bytes
+  themselves — an ID3 tag or a valid MPEG frame sync — never from the browser-supplied MIME type,
+  which is only used to reject an obviously wrong selection early. The browser computes the
+  SHA-256, retrieves the public certificate by `cert_id`, and requires `media_type: audio`,
+  `mime_type: audio/mpeg`, two well-formed digests and `source_sha256 == sealed_sha256` before the
+  local hash is compared. Only then is the Verify Gate consulted.
+
+  Audio reports its own seven layers — local processing, MP3 format, public certificate, media
+  contract, byte-preserving seal, local file hash, cryptographic verification — because there is no
+  embedded capsule to check. Lens does not imply a proof that does not exist, and a hash mismatch is
+  decided locally without contacting the Verify Gate at all.
 
 Local parsing never claims to prove remote custody. The final decision always comes from the Verify
 Gate.

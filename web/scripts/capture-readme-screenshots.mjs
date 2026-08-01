@@ -22,6 +22,7 @@ const MANIFEST = path.join(OUTPUT_DIR, "manifest.json");
 
 /** Public certificate identifiers already published in the safe reports. */
 const GEMINI_CERT = "firemark-cert-977dce1a6b5b7add352854900ddac911";
+const ELEVENLABS_CERT = "firemark-cert-e0c6fbf7bfc482f765c636963cfcbbbf";
 
 const DESKTOP = { width: 1440, height: 1000 };
 const MOBILE = { width: 390, height: 844 };
@@ -32,6 +33,24 @@ const TARGETS = [
   { file: "landing-mobile.webp", route: "/", viewport: MOBILE, fullPage: false },
   { file: "verify.webp", route: "/verify", viewport: DESKTOP, fullPage: false },
   {
+    // Preview-only until the Lens release ships: capture from a local dev
+    // server rather than publish a production page that lacks the feature.
+    file: "verify-image.webp",
+    route: "/verify?media=image",
+    viewport: DESKTOP,
+    fullPage: false,
+    preview: true,
+  },
+  {
+    // Empty audio drop state. A VERIFIED result requires a real local file and
+    // is never captured automatically.
+    file: "verify-audio.webp",
+    route: `/verify?cert_id=${ELEVENLABS_CERT}&media=audio`,
+    viewport: DESKTOP,
+    fullPage: false,
+    preview: true,
+  },
+  {
     file: "certificate-gemini.webp",
     route: `/certificate/${GEMINI_CERT}`,
     viewport: DESKTOP,
@@ -39,10 +58,32 @@ const TARGETS = [
   },
 ];
 
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function readFlag(name) {
+  const index = process.argv.indexOf(name);
+  return index !== -1 ? process.argv[index + 1] : undefined;
+}
+
+/**
+ * Production captures must be HTTPS. A preview origin may be a local dev server
+ * so a not-yet-deployed screen can be captured honestly instead of fabricated.
+ */
+function parseOrigin(raw, { allowLocal = false } = {}) {
+  const parsed = new URL(raw);
+  const isLocal = allowLocal && LOCAL_HOSTS.has(parsed.hostname === "::1" ? "[::1]" : parsed.hostname);
+  if (parsed.protocol !== "https:" && !(isLocal && parsed.protocol === "http:")) {
+    throw new Error("The origin must use HTTPS unless it is an explicit local preview.");
+  }
+  if (parsed.search || parsed.hash || parsed.username || parsed.password) {
+    throw new Error("The origin must not carry a query, fragment or credentials.");
+  }
+  return parsed.origin;
+}
+
 function resolveOrigin() {
-  const flag = process.argv.indexOf("--origin");
   const raw =
-    (flag !== -1 ? process.argv[flag + 1] : undefined) ??
+    readFlag("--origin") ??
     process.env.FIREMARK_PUBLIC_SITE_URL ??
     process.env.NEXT_PUBLIC_FIREMARK_SITE_URL;
   if (!raw) {
@@ -50,12 +91,12 @@ function resolveOrigin() {
     console.error("Pass --origin https://<public-site> or set FIREMARK_PUBLIC_SITE_URL.");
     process.exit(2);
   }
-  const parsed = new URL(raw);
-  if (parsed.protocol !== "https:") throw new Error("The public origin must use HTTPS.");
-  if (parsed.search || parsed.hash || parsed.username || parsed.password) {
-    throw new Error("The public origin must not carry a query, fragment or credentials.");
-  }
-  return parsed.origin;
+  return parseOrigin(raw);
+}
+
+function resolvePreviewOrigin() {
+  const raw = readFlag("--preview-origin") ?? process.env.FIREMARK_PREVIEW_SITE_URL;
+  return raw ? parseOrigin(raw, { allowLocal: true }) : null;
 }
 
 /** Reject a blank or single-colour capture before it reaches the README. */
@@ -111,10 +152,12 @@ async function capture(browser, origin, target) {
 
   return {
     filename: target.file,
-    route: target.route,
+    // Record only the path: a query string never enters the manifest.
+    route: target.route.split("?")[0],
     viewport: `${target.viewport.width}x${target.viewport.height}`,
     rendered: `${meta.width}x${meta.height}`,
     http_status: status,
+    source: target.preview ? "preview" : "production",
     captured_at: new Date().toISOString(),
     sha256: createHash("sha256").update(webp).digest("hex"),
     byte_size: webp.length,
@@ -124,15 +167,22 @@ async function capture(browser, origin, target) {
 
 async function main() {
   const origin = resolveOrigin();
+  const previewOrigin = resolvePreviewOrigin();
   console.log(`public origin: ${origin}`);
+  if (previewOrigin) console.log(`preview origin: ${previewOrigin}`);
   await mkdir(OUTPUT_DIR, { recursive: true });
 
   const browser = await chromium.launch();
   const entries = [];
   try {
     for (const target of TARGETS) {
+      const base = target.preview ? previewOrigin : origin;
+      if (!base) {
+        console.warn(`SKIP ${target.file}: no preview origin supplied`);
+        continue;
+      }
       try {
-        const entry = await capture(browser, origin, target);
+        const entry = await capture(browser, base, target);
         entries.push(entry);
         console.log(`PASS ${target.file} (${entry.rendered}, ${entry.byte_size} bytes)`);
       } catch (error) {

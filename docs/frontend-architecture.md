@@ -179,3 +179,32 @@ server behind HTTPS, configure the exact deployed frontend origin in FastAPI, an
 delivery bearer only to the Next.js server runtime.
 
 No deployment has been performed. Demo recording and hackathon submission remain pending.
+
+## FIREMARK Lens — multimodal local verification
+
+`/verify` exposes one Lens with three panels: **Image · PNG**, **Audio · MP3** and a manual
+certificate lookup. The mode is chosen by a `role="tablist"` control; `?media=image` or
+`?media=audio` selects it directly, and `?cert_id=` prefills the audio certificate field. A
+`sha256` query parameter is never treated as verification evidence.
+
+| | Image · PNG | Audio · MP3 |
+| --- | --- | --- |
+| Module | `lib/file-verification/verify-file.ts` | `lib/file-verification/verify-audio.ts` |
+| Limit | 25 MiB | 50 MiB |
+| Format proof | PNG chunk + CRC parsing | ID3 tag or MPEG frame sync, read from the bytes |
+| Identifier source | embedded `FiremarkPublicCapsuleV1` | operator-supplied `cert_id` |
+| Certificate GET | not required | required, and validated before the hash is trusted |
+| Layers | 8 capsule-oriented layers | 7 audio layers, no capsule claimed |
+| Preview | — | optional local `<audio>` object URL, revoked on change and unmount |
+
+The audio flow fails closed at every boundary: a malformed certificate ID, a non-MP3 payload, an
+oversized or empty file, a missing, revoked or unreachable certificate, a non-`audio/mpeg` media
+contract, malformed certificate digests, a `source_sha256 != sealed_sha256` certificate, a local
+hash mismatch, or an unavailable Verify Gate. A hash mismatch is decided locally and never reaches
+the API.
+
+State is isolated per mode. Changing the file, the certificate ID or the mode aborts any in-flight
+request and clears a previous decision, so a stale success can never be displayed.
+
+**What leaves the browser:** the public certificate ID and the locally computed SHA-256. Nothing
+else — no bytes, Base64, `ArrayBuffer`, `Blob`, `File`, `FormData`, filename or local path.

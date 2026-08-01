@@ -81,7 +81,10 @@ export function VerificationLayers({ result }: { result: LensResult }) {
               {layer.status === "PASS" ? "✓" : layer.status === "FAIL" ? "×" : "–"}
             </span>
             <strong>{layer.label}</strong>
-            <em>{layer.status}</em>
+            <em>
+              {layer.status}
+              {layer.detail ? <span className="layer-detail"> — {layer.detail}</span> : null}
+            </em>
           </li>
         ))}
       </ol>

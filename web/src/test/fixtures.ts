@@ -34,6 +34,31 @@ export const certificateFixture: PublicCertificate = {
   verify_url: `https://api.firemark.test/v1/certificates/${CERT_ID}`,
 };
 
+export const AUDIO_CERT_ID = "fm-cert-test-audio-1";
+/** MP3 sealing is byte-preserving, so source and sealed digests are identical. */
+export const AUDIO_SEALED_SHA = "d".repeat(64);
+
+export function audioCertificateFixture(
+  overrides: Partial<PublicCertificate> = {},
+): PublicCertificate {
+  return {
+    ...certificateFixture,
+    cert_id: AUDIO_CERT_ID,
+    asset_id: "fm-asset-test-audio-1",
+    run_id: "fm-run-test-audio-1",
+    provider: "elevenlabs",
+    model: "eleven_multilingual_v2",
+    media_type: "audio",
+    mime_type: "audio/mpeg",
+    width: null,
+    height: null,
+    duration_ms: 4200,
+    source_sha256: AUDIO_SEALED_SHA,
+    sealed_sha256: AUDIO_SEALED_SHA,
+    ...overrides,
+  };
+}
+
 export function verificationFixture(
   status: VerificationResult["status"] = "verified",
 ): VerificationResult {

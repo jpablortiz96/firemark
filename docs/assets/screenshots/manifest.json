@@ -8,7 +8,8 @@
       "viewport": "1440x1000",
       "rendered": "2880x2000",
       "http_status": 200,
-      "captured_at": "2026-08-01T15:33:07.577Z",
+      "source": "production",
+      "captured_at": "2026-08-01T19:40:29.562Z",
       "sha256": "e9e2a6da89a07e56244c47ed66bc4ee8aeb75ae94e9f8369a188220d4808c6ca",
       "byte_size": 119576,
       "console_errors": 0
@@ -19,7 +20,8 @@
       "viewport": "390x844",
       "rendered": "780x1688",
       "http_status": 200,
-      "captured_at": "2026-08-01T15:33:10.453Z",
+      "source": "production",
+      "captured_at": "2026-08-01T19:40:32.121Z",
       "sha256": "87b46544d40f9da9f91931f2b6edbf4e6bd52b34c0965cedc35226439348669e",
       "byte_size": 58652,
       "console_errors": 0
@@ -30,10 +32,35 @@
       "viewport": "1440x1000",
       "rendered": "2880x2000",
       "http_status": 200,
-      "captured_at": "2026-08-01T15:33:13.820Z",
+      "source": "production",
+      "captured_at": "2026-08-01T19:40:35.165Z",
       "sha256": "76eeb35a5df14600b6686efbfd032f15e46b94399573a456f58ab26ea6c768de",
       "byte_size": 82334,
       "console_errors": 0
+    },
+    {
+      "filename": "verify-image.webp",
+      "route": "/verify",
+      "viewport": "1440x1000",
+      "rendered": "2880x2000",
+      "http_status": 200,
+      "source": "preview",
+      "captured_at": "2026-08-01T19:40:37.448Z",
+      "sha256": "e300f2a03fca27d2cc16ccb083bf2d46fd9e68864fd818b7587b5a85e3bc5176",
+      "byte_size": 83916,
+      "console_errors": 4
+    },
+    {
+      "filename": "verify-audio.webp",
+      "route": "/verify",
+      "viewport": "1440x1000",
+      "rendered": "2880x2000",
+      "http_status": 200,
+      "source": "preview",
+      "captured_at": "2026-08-01T19:40:39.777Z",
+      "sha256": "1d118f0b72d419ded24b98d37af6228c9338f9a0c37f3a51834023db0f8997bc",
+      "byte_size": 96168,
+      "console_errors": 4
     },
     {
       "filename": "certificate-gemini.webp",
@@ -41,7 +68,8 @@
       "viewport": "1440x1000",
       "rendered": "2880x3568",
       "http_status": 200,
-      "captured_at": "2026-08-01T15:33:17.986Z",
+      "source": "production",
+      "captured_at": "2026-08-01T19:40:43.377Z",
       "sha256": "594e510670e5f33ae461607a2b4f3da8a2d7fed06b410e9eb41c142b55834b9f",
       "byte_size": 144708,
       "console_errors": 0
