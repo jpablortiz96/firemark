@@ -1,0 +1,31 @@
+%% FIREMARK trust boundaries — public, private, secret and immutable zones
+flowchart TB
+  subgraph PUB["PUBLIC — anyone may read"]
+    P1["Public certificate projection"]
+    P2["cert / run / asset IDs"]
+    P3["source_sha256 · sealed_sha256"]
+    P4["canonical_hash · signer_key_id"]
+    P5["Ed25519 public key + signature"]
+    P6["PNG public capsule"]
+  end
+  subgraph PRIV["PRIVATE — service role only"]
+    R1["Prompt and TTS text"]
+    R2["Full Genblaze manifest"]
+    R3["Provider parameters and seed"]
+    R4["Storage keys and VersionIds"]
+  end
+  subgraph SEC["SECRET — never leaves the server"]
+    S1["Ed25519 private key"]
+    S2["Provider API keys"]
+    S3["Supabase service role key"]
+    S4["B2 application keys"]
+  end
+  subgraph IMM["IMMUTABLE — cannot be rewritten"]
+    I1["Vault source object"]
+    I2["Vault manifest object"]
+    I3["Object Lock COMPLIANCE retention"]
+  end
+  SEC -->|signs| PUB
+  PRIV -->|canonical_hash only| PUB
+  PRIV -->|retained bytes| IMM
+  IMM -->|exact VersionId reference| PUB

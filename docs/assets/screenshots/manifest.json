@@ -1,0 +1,50 @@
+{
+  "schema_version": "firemark.screenshot-manifest.v1",
+  "origin": "https://firemark-web.vercel.app",
+  "screenshots": [
+    {
+      "filename": "landing-desktop.webp",
+      "route": "/",
+      "viewport": "1440x1000",
+      "rendered": "2880x2000",
+      "http_status": 200,
+      "captured_at": "2026-08-01T15:33:07.577Z",
+      "sha256": "e9e2a6da89a07e56244c47ed66bc4ee8aeb75ae94e9f8369a188220d4808c6ca",
+      "byte_size": 119576,
+      "console_errors": 0
+    },
+    {
+      "filename": "landing-mobile.webp",
+      "route": "/",
+      "viewport": "390x844",
+      "rendered": "780x1688",
+      "http_status": 200,
+      "captured_at": "2026-08-01T15:33:10.453Z",
+      "sha256": "87b46544d40f9da9f91931f2b6edbf4e6bd52b34c0965cedc35226439348669e",
+      "byte_size": 58652,
+      "console_errors": 0
+    },
+    {
+      "filename": "verify.webp",
+      "route": "/verify",
+      "viewport": "1440x1000",
+      "rendered": "2880x2000",
+      "http_status": 200,
+      "captured_at": "2026-08-01T15:33:13.820Z",
+      "sha256": "76eeb35a5df14600b6686efbfd032f15e46b94399573a456f58ab26ea6c768de",
+      "byte_size": 82334,
+      "console_errors": 0
+    },
+    {
+      "filename": "certificate-gemini.webp",
+      "route": "/certificate/firemark-cert-977dce1a6b5b7add352854900ddac911",
+      "viewport": "1440x1000",
+      "rendered": "2880x3568",
+      "http_status": 200,
+      "captured_at": "2026-08-01T15:33:17.986Z",
+      "sha256": "594e510670e5f33ae461607a2b4f3da8a2d7fed06b410e9eb41c142b55834b9f",
+      "byte_size": 144708,
+      "console_errors": 0
+    }
+  ]
+}

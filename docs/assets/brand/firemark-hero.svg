@@ -1,0 +1,179 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 720" width="1600" height="720" role="img" aria-labelledby="heroTitle heroDesc" font-family="Inter, ui-sans-serif, system-ui, 'Segoe UI', Arial, sans-serif">
+  <title id="heroTitle">FIREMARK — Every AI asset ships with a Birth Certificate, or it does not ship at all</title>
+  <desc id="heroDesc">A dark technical hero. On the left the FIREMARK wordmark, the tagline "Generate. Seal. Verify. Deliver." and evidence chips. On the right a generated AI asset flows through a byte fingerprint, an Ed25519 seal and immutable Backblaze B2 custody into a verified public certificate.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d0f0f"/>
+      <stop offset="0.55" stop-color="#070808"/>
+      <stop offset="1" stop-color="#0b0c0c"/>
+    </linearGradient>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff5a1f"/>
+      <stop offset="1" stop-color="#ffad32"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff5a1f" stop-opacity="0.15"/>
+      <stop offset="0.5" stop-color="#ffad32" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#8dffbc" stop-opacity="0.55"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff5a1f" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#ff5a1f" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowCool" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#8dffbc" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#8dffbc" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity="0.030" stroke-width="1"/>
+    </pattern>
+    <clipPath id="assetClip"><rect x="892" y="196" width="196" height="196" rx="2"/></clipPath>
+  </defs>
+
+  <rect width="1600" height="720" fill="url(#bg)"/>
+  <rect width="1600" height="720" fill="url(#grid)"/>
+  <ellipse cx="1000" cy="286" rx="430" ry="300" fill="url(#glow)"/>
+  <ellipse cx="1412" cy="470" rx="300" ry="240" fill="url(#glowCool)"/>
+  <rect x="0" y="0" width="1600" height="3" fill="url(#ember)"/>
+
+  <!-- ============================ LEFT: identity ============================ -->
+  <g transform="translate(96 112)">
+    <!-- wordmark: skewed ember tile, matching the product header -->
+    <path d="M0 0 H56 L44 56 H-12 Z" fill="url(#ember)"/>
+    <text x="12" y="39" font-size="27" font-weight="800" fill="#130704" letter-spacing="-0.5">F</text>
+    <text x="78" y="41" font-size="42" font-weight="800" fill="#f4f1e9" letter-spacing="7.5">FIREMARK</text>
+
+    <g font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="13" font-weight="700" letter-spacing="3.4">
+      <rect x="79" y="60" width="26" height="1.5" fill="#ff5a1f"/>
+      <text x="117" y="66" fill="#ffad32">PROOF INFRASTRUCTURE FOR AI MEDIA</text>
+    </g>
+
+    <text x="0" y="146" font-size="53" font-weight="800" fill="#f4f1e9" letter-spacing="-1.4">Every AI asset ships with a</text>
+    <text x="0" y="202" font-size="53" font-weight="800" letter-spacing="-1.4" fill="#ff5a1f">Birth Certificate<tspan fill="#f4f1e9"> — or it</tspan></text>
+    <text x="0" y="258" font-size="53" font-weight="800" fill="#f4f1e9" letter-spacing="-1.4">doesn&#39;t ship at all.</text>
+
+    <text x="0" y="304" font-size="20" fill="#c4c5bf">FIREMARK turns AI-generated media into independently verifiable</text>
+    <text x="0" y="332" font-size="20" fill="#c4c5bf">evidence — from the first provider byte to the final delivered asset.</text>
+
+    <g font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="17" font-weight="700" letter-spacing="4.6">
+      <text x="0" y="392" fill="#f4f1e9">GENERATE.</text>
+      <text x="148" y="392" fill="#ffad32">SEAL.</text>
+      <text x="248" y="392" fill="#ff5a1f">VERIFY.</text>
+      <text x="376" y="392" fill="#8dffbc">DELIVER.</text>
+    </g>
+
+    <!-- evidence chips -->
+    <g font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="14" font-weight="700" letter-spacing="1.6">
+      <g transform="translate(0 428)">
+        <rect width="196" height="40" rx="2" fill="#111414" stroke="#2b2e2c"/>
+        <circle cx="19" cy="20" r="4" fill="#8dffbc"/>
+        <text x="34" y="25" fill="#a8aaa4">PRODUCTION VERIFIED</text>
+      </g>
+      <g transform="translate(212 428)">
+        <rect width="150" height="40" rx="2" fill="#111414" stroke="#2b2e2c"/>
+        <circle cx="19" cy="20" r="4" fill="#ffad32"/>
+        <text x="34" y="25" fill="#a8aaa4">ED25519 SIGNED</text>
+      </g>
+      <g transform="translate(378 428)">
+        <rect width="184" height="40" rx="2" fill="#111414" stroke="#2b2e2c"/>
+        <circle cx="19" cy="20" r="4" fill="#ff5a1f"/>
+        <text x="34" y="25" fill="#a8aaa4">IMMUTABLE CUSTODY</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ======================= RIGHT: evidence pipeline ======================= -->
+
+  <!-- 1. the generated AI asset -->
+  <g transform="translate(0 0)">
+    <rect x="884" y="188" width="212" height="212" rx="3" fill="#111414" stroke="#2b2e2c" stroke-width="1.5"/>
+    <g clip-path="url(#assetClip)">
+      <rect x="892" y="196" width="196" height="196" fill="#0d0f0f"/>
+      <ellipse cx="990" cy="300" rx="86" ry="86" fill="url(#ember)" opacity="0.30"/>
+      <path d="M990 224c22 34 46 46 46 80a46 46 0 0 1-92 0c0-20 12-34 22-48 6 12 14 16 14 6 0-14 4-26 10-38Z" fill="url(#ember)" opacity="0.95"/>
+      <path d="M990 268c10 16 22 22 22 38a22 22 0 0 1-44 0c0-10 6-16 11-23 3 6 7 8 7 3 0-7 1-13 4-18Z" fill="#f4f1e9" opacity="0.90"/>
+    </g>
+    <g font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="13" font-weight="700" letter-spacing="1.8">
+      <rect x="884" y="152" width="212" height="30" rx="2" fill="#0d0f0f" stroke="#2b2e2c"/>
+      <text x="898" y="172" fill="#a8aaa4">AI SOURCE</text>
+      <text x="1010" y="172" fill="#ffad32">image/jpeg</text>
+    </g>
+    <text x="990" y="428" text-anchor="middle" font-size="15" font-weight="700" fill="#f4f1e9">Provider output</text>
+    <text x="990" y="450" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="12.5" fill="#777a75">Gemini · ElevenLabs · OpenAI</text>
+  </g>
+
+  <!-- flow rail -->
+  <path d="M1104 294 H1180" stroke="url(#flow)" stroke-width="2.5"/>
+  <path d="M1176 288 l10 6 -10 6 Z" fill="#ffad32"/>
+  <path d="M1330 294 H1406" stroke="url(#flow)" stroke-width="2.5"/>
+  <path d="M1402 288 l10 6 -10 6 Z" fill="#8dffbc"/>
+
+  <!-- 2. byte fingerprint + seal -->
+  <g transform="translate(1188 152)">
+    <rect width="136" height="284" rx="3" fill="#111414" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="68" y="30" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="12.5" font-weight="700" fill="#ffad32" letter-spacing="1.6">FINGERPRINT</text>
+
+    <!-- byte pattern = the source digest -->
+    <g font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="11" fill="#8dffbc" opacity="0.85">
+      <text x="18" y="56">e8 7e f0 38</text>
+      <text x="18" y="74">a9 89 dc b0</text>
+      <text x="18" y="92">0f 6e 76 01</text>
+    </g>
+
+    <!-- fingerprint ridges over a cryptographic seal -->
+    <g transform="translate(68 176)">
+      <circle r="54" fill="#0d0f0f" stroke="#2b2e2c"/>
+      <g fill="none" stroke="url(#ember)" stroke-width="2.2" stroke-linecap="round">
+        <path d="M-34 8a34 34 0 0 1 68 0"/>
+        <path d="M-24 12a24 24 0 0 1 48 0"/>
+        <path d="M-14 16a14 14 0 0 1 28 0"/>
+      </g>
+      <path d="M0 -46 l40 20v24c0 26-18 40-40 48-22-8-40-22-40-48v-24Z" fill="none" stroke="#ffad32" stroke-width="2.2"/>
+      <path d="M-13 -2 l9 10 18-20" fill="none" stroke="#8dffbc" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <text x="68" y="262" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="12" font-weight="700" fill="#a8aaa4" letter-spacing="1.4">ED25519</text>
+    <text x="68" y="316" text-anchor="middle" font-size="15" font-weight="700" fill="#f4f1e9">Sealed evidence</text>
+    <text x="68" y="338" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="12.5" fill="#777a75">source ≠ sealed</text>
+  </g>
+
+  <!-- 3. immutable custody + public certificate -->
+  <g transform="translate(1412 152)">
+    <rect width="128" height="284" rx="3" fill="#111414" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="64" y="30" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="12.5" font-weight="700" fill="#8dffbc" letter-spacing="1.6">CUSTODY</text>
+
+    <!-- stacked immutable versions -->
+    <g transform="translate(20 46)">
+      <rect width="88" height="20" rx="1.5" fill="#0d0f0f" stroke="#2b2e2c"/>
+      <rect y="26" width="88" height="20" rx="1.5" fill="#0d0f0f" stroke="#2b2e2c"/>
+      <rect y="52" width="88" height="20" rx="1.5" fill="#0d0f0f" stroke="#ff5a1f" stroke-opacity="0.55"/>
+      <g font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="10.5" fill="#777a75">
+        <text x="9" y="14">source.jpg</text>
+        <text x="9" y="40">manifest</text>
+        <text x="9" y="66" fill="#ffad32">sealed.png</text>
+      </g>
+    </g>
+
+    <!-- lock -->
+    <g transform="translate(64 168)">
+      <rect x="-21" y="-6" width="42" height="34" rx="3" fill="#0d0f0f" stroke="#ffad32" stroke-width="2"/>
+      <path d="M-12 -6v-11a12 12 0 0 1 24 0v11" fill="none" stroke="#ffad32" stroke-width="2"/>
+      <circle cy="10" r="3.4" fill="#ffad32"/>
+    </g>
+    <text x="64" y="216" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="11" font-weight="700" fill="#a8aaa4" letter-spacing="1">OBJECT LOCK</text>
+    <text x="64" y="234" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="11" font-weight="700" fill="#8dffbc" letter-spacing="1">COMPLIANCE</text>
+    <text x="64" y="262" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="10.5" fill="#777a75" letter-spacing="0.6">exact VersionIds</text>
+    <text x="64" y="316" text-anchor="middle" font-size="15" font-weight="700" fill="#f4f1e9">Verified</text>
+    <text x="64" y="338" text-anchor="middle" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="12.5" fill="#777a75">public certificate</text>
+  </g>
+
+  <!-- bottom evidence rail -->
+  <g transform="translate(96 618)" font-family="Consolas, 'SF Mono', Menlo, monospace" font-size="13" letter-spacing="1.5">
+    <rect x="-1" y="-1" width="1410" height="1" fill="#2b2e2c"/>
+    <text x="0" y="34" fill="#777a75">881 TESTS PASSING</text>
+    <text x="228" y="34" fill="#777a75">95.61% COVERAGE</text>
+    <text x="466" y="34" fill="#777a75">14/14 DEPLOYED-STACK STAGES</text>
+    <text x="836" y="34" fill="#777a75">MULTIMODAL: IMAGE + AUDIO</text>
+    <text x="1176" y="34" fill="#8dffbc">LIVE ON RAILWAY</text>
+  </g>
+</svg>

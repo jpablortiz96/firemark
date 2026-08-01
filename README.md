@@ -1,914 +1,613 @@
-# FIREMARK
+<div align="center">
 
-FIREMARK is a production-oriented application for creating an auditable chain between generated
-media, its provenance, its sealed representation, and the decision to release it.
+<img src="docs/assets/brand/firemark-hero.svg" alt="FIREMARK — Every AI asset ships with a Birth Certificate, or it doesn't ship at all" width="960">
 
-## Product thesis
+<br>
 
-Generated media should not be delivered on trust alone. FIREMARK is intended to preserve evidence
-from generation through sealing and to make successful verification a prerequisite for delivery.
+**Generate. Seal. Verify. Deliver.**
 
-## Problem statement
+FIREMARK turns AI-generated media into independently verifiable evidence —
+from the first provider byte to the final delivered asset.
 
-Media generation systems can produce provenance, but that evidence can become detached from the
-asset as it moves through storage and delivery. A recipient needs a clear way to determine what was
-generated, what was sealed, who signed the evidence, and whether the delivered artifact still
-matches that evidence.
+<br>
 
-## Locked product scope
+[![Live](https://img.shields.io/badge/Live-firemark--web.vercel.app-ff5a1f?style=flat-square&labelColor=0d0f0f)](https://firemark-web.vercel.app)
+[![API](https://img.shields.io/badge/API-Railway-ffad32?style=flat-square&labelColor=0d0f0f)](https://firemark-api-production.up.railway.app/healthz)
+[![Tests](https://img.shields.io/badge/tests-881%20passing-8dffbc?style=flat-square&labelColor=0d0f0f)](#quality)
+[![Coverage](https://img.shields.io/badge/coverage-95.61%25-8dffbc?style=flat-square&labelColor=0d0f0f)](#quality)
+[![License](https://img.shields.io/badge/license-MIT-a8aaa4?style=flat-square&labelColor=0d0f0f)](LICENSE)
 
-FIREMARK has exactly three product capabilities:
+<br>
 
-1. **Generate & Seal** — orchestrate generation, preserve provenance, and create a sealed artifact.
-2. **Public Birth Certificate** — expose a redacted, public record for a sealed artifact.
-3. **Verify Gate** — block delivery unless verification succeeds.
+**[Launch FIREMARK](https://firemark-web.vercel.app)** ·
+**[Verify a certificate](https://firemark-web.vercel.app/verify)** ·
+**[See a real Birth Certificate](https://firemark-web.vercel.app/certificate/firemark-cert-977dce1a6b5b7add352854900ddac911)** ·
+**[Architecture](docs/architecture.md)** ·
+**[Trust model](docs/trust-model.md)** ·
+**[60-second demo](docs/demo.md)**
 
-## Trust model
+</div>
 
-The trust model preserves complete Genblaze provenance privately, embeds a closed redacted
-FIREMARK public capsule in supported media, signs a FIREMARK Seal Envelope with Ed25519, and
-retains original evidence in immutable object storage. Public verification connects those records
-without exposing private evidence or credentials.
+---
 
-`source_sha256` and `sealed_sha256` retain distinct roles and must never be treated as
-interchangeable labels:
+<div align="center">
 
-- `source_sha256` identifies the generated provider output before media embedding.
-- `sealed_sha256` identifies the final distributed file after the media-specific sealing strategy.
+`PRODUCTION VERIFIED` &nbsp;·&nbsp; `MULTIMODAL: IMAGE + AUDIO` &nbsp;·&nbsp; `881 TESTS PASSING` &nbsp;·&nbsp; `95.61% COVERAGE`
+<br>
+`ED25519 SIGNED` &nbsp;·&nbsp; `IMMUTABLE B2 CUSTODY` &nbsp;·&nbsp; `ZERO-UPLOAD VERIFICATION` &nbsp;·&nbsp; `14/14 DEPLOYED-STACK STAGES`
 
-For PNG images those values must differ because capsule embedding changes the container. MP3 audio
-uses an explicitly byte-preserving sealing strategy, so both roles intentionally contain the same
-digest. Audio is verified by `cert_id` plus the locally calculated hash; FIREMARK does not claim an
-embedded audio capsule.
+</div>
 
-The local Trust Kernel signs the complete canonical FIREMARK Seal Envelope with Ed25519. A valid
-signature proves that the envelope bytes have not changed since a holder of the corresponding
-private key signed them. It also binds the envelope to the expected public-key fingerprint and
-`signer_key_id`.
+---
 
-The signature does not prove that generation occurred, that a provider's provenance claims are
-true, that an asset was stored immutably, or that the named signer was authorized. Those assurances
-require the provider, custody, identity, and operational controls that are outside this milestone.
-The detached signature is not embedded into media because that would create a circular dependency
-with `sealed_sha256`.
+## Contents
 
-## Repository status
+[The problem](#the-problem) ·
+[How FIREMARK works](#how-firemark-works) ·
+[See it running](#see-it-running) ·
+[Why this is different](#why-this-is-different) ·
+[Architecture](#architecture) ·
+[Trust contracts](#media-aware-trust-contracts) ·
+[Backblaze B2](#backblaze-b2--the-chain-of-custody) ·
+[Genblaze](#genblaze--canonical-private-provenance) ·
+[Security](#security-and-trust-model) ·
+[Who needs this](#who-needs-this) ·
+[Production evidence](#production-evidence) ·
+[Quickstart](#developer-quickstart) ·
+[Business model](#business-model) ·
+[Defensibility](#defensibility) ·
+[Roadmap](#roadmap) ·
+[Quality](#quality)
 
-The repository contains the local Trust Kernel, Genblaze provenance integration, B2 Custody
-Kernel, Control Plane, and production Generate & Seal path for PNG images and MP3 audio. The live B2 checkpoint
-has proved COMPLIANCE retention and the live Supabase checkpoint has proved RLS, atomic
-registration, public projection, events, and revocation. Generate & Seal now wires the official
-OpenAI SDK, private canonical provenance, capsule embedding, custody, sealed storage, signing,
-atomic registration, and authenticated delivery. The completed live Generate & Seal checkpoint
-proved that entire path against real OpenAI, B2, and Supabase services. Ordinary tests remain
-zero-network.
+---
 
-## Roadmap
+## The problem
 
-Completed milestones are repository foundation, Trust Kernel, SealEnvelopeV1, Genblaze
-provenance, B2 Custody and live COMPLIANCE proof, FastAPI Control Plane, Supabase schema and live
-verification, live Generate & Seal, the local public web experience, FIREMARK Lens, and Public
-Proof Pack export. Remaining work is owner-operated deployment, demo recording, and hackathon
-submission.
+AI media is trivial to create and nearly impossible to prove.
 
-## Control Plane
+A screenshot, a watermark or a database row does not independently establish:
 
-The FastAPI application is built by `api.firemark.app.create_app()`. Construction creates no
-external clients and accepts injected repository and delivery-storage implementations. Local and
-test use can rely on the deterministic in-memory repository. The Supabase adapter is constructed
-explicitly from complete server-side settings and creates its client only on its first operation.
+- **which provider** actually produced an asset;
+- **which bytes** were originally generated;
+- **whether those bytes changed** between generation and delivery;
+- **who sealed** the evidence, and with what key;
+- **whether the custody record itself** was quietly rewritten;
+- **whether the file you received** is the file the certificate describes.
 
-The HTTP surface is intentionally small:
+Watermarks degrade under compression. Metadata is strippable. A registry you have to trust is
+just a database — and a database can be edited by whoever owns it.
 
-| Method | Path | Contract |
-| --- | --- | --- |
-| `GET` | `/healthz` | Local process health; external dependencies are not contacted. |
-| `GET` | `/v1/certificates/{cert_id}` | Redacted public Birth Certificate. |
-| `POST` | `/v1/verify` | Signature, envelope, custody-reference, status, and optional hash verification. |
-| `POST` | `/v1/generate-and-seal` | Admin-authenticated, idempotent image or audio generation and sealing. |
-| `POST` | `/v1/delivery/{cert_id}` | Delivery-authenticated Verify Gate requiring the exact `sealed_sha256`. |
+> The gap is not detection. The gap is **evidence**.
 
-The public certificate includes public identifiers, provider/model, categorical and MIME media
-types, byte size, safe dimensions/duration, both asset hashes, `canonical_hash`, signer material,
-status, issuance time, verification URL, and a redacted media projection. Prompts, parameters,
-seeds, storage locations, VersionIds, and custody receipt internals remain private.
+---
 
-The Verify Gate records verification before making a delivery decision. It asks the injected B2
-delivery adapter to confirm the recorded exact VersionId and then issue a short-lived private
-download only after status, signature, envelope, custody references, and presented
-`sealed_sha256` all pass. The raw URL exists only in the successful HTTP serializer; the domain
-result, event repository, logs, exceptions, and failure responses contain no URL.
+## How FIREMARK works
 
-The migration at `supabase/migrations/20260729000100_firemark_control_plane.sql` creates six RLS
-tables. Anonymous and authenticated roles receive no direct table access. A safe public certificate
-RPC exposes an allowlist, while a service-role-only PostgreSQL RPC atomically and idempotently
-registers the run, asset, custody record, and certificate.
-`20260730000100_firemark_multimedia.sql` adds public-safe multimedia facts, conditional image hash
-constraints, and the expanded atomic/public projections without exposing private evidence.
+Four stages, each producing evidence the next stage commits to.
 
-## Generate & Seal architecture
+| | Stage | What is produced |
+| :--: | --- | --- |
+| **1** | **Generate** | One provider request. The untouched output bytes are hashed as `source_sha256` before anything touches them. |
+| **2** | **Seal** | Genblaze builds a canonical private manifest → `canonical_hash`. The distributable carrier is produced and hashed as `sealed_sha256`. An Ed25519 `SealEnvelopeV1` signs the whole binding. |
+| **3** | **Preserve** | Source bytes and the full manifest are written to a Backblaze B2 vault under **Object Lock COMPLIANCE** retention. Custody is claimed only after retention is read *back* from B2 and the exact bytes re-downloaded by `VersionId`. |
+| **4** | **Verify & deliver** | Anyone can read the public certificate. Delivery is blocked until signature, envelope, custody references and the presented `sealed_sha256` all pass. |
 
-`api.firemark.bootstrap.build_runtime()` is the explicit production composition root. Repository
-selection is controlled by `FIREMARK_REPOSITORY_BACKEND`; `memory` remains available for ordinary
-tests and `supabase` selects the lazy service-role adapter. Application construction performs no
-network request. Provider, B2, signing, and delivery dependencies are constructed only when their
-operation is requested, and each boundary remains injectable.
+Nothing is returned as "sealed" until custody and registration are verified. If any link
+disagrees, verification **fails closed** — it never degrades into trust.
 
-`POST /v1/generate-and-seal` requires `Authorization: Bearer <FIREMARK_ADMIN_API_KEY>` and a safe
-`Idempotency-Key`. The request follows this order:
+---
 
-1. Generate one PNG through OpenAI/Google Gemini or one MP3 through ElevenLabs and hash the
-   untouched bytes as `source_sha256`.
-2. Build and verify the complete private canonical Genblaze Manifest and obtain its
-   `canonical_hash`.
-3. For PNG, embed `FiremarkPublicCapsuleV1` into a deterministic `tEXt` chunk. For MP3, create a
-   closed `FiremarkPublicAudioReferenceV1` without changing or pretending to embed audio bytes.
-4. Retain the raw source and full Manifest in the B2 vault under COMPLIANCE retention, verifying
-   bytes and exact VersionIds.
-5. Upload and re-download sealed media at a content-addressed `.png` or `.mp3` key using
-   allowlisted metadata only.
-6. Construct and sign `SealEnvelopeV1`, then atomically register the complete certificate bundle
-   in Supabase. No successful API response is returned before verified custody and registration.
+## See it running
 
-The idempotency key deterministically names the private run, asset, and certificate. A private
-request fingerprint stored inside `parameters_private` returns the same completed result for an
-identical retry and rejects a conflicting retry with HTTP 409. Failed pre-registration work can be
-retried safely; persisted partial locations are carried only by internal safe errors and never
-returned as credentials or URLs.
+Real screenshots from the deployed production site. Not mockups.
 
-The public capsule contains only its fixed schema version, certificate/run/asset identifiers,
-`canonical_hash`, `source_sha256`, signer key ID, verification URL, and issuance time. It excludes
-`sealed_sha256` because embedding that value would create a circular hash. It also excludes prompts,
-parameters, seeds, provider responses and credentials, full manifests, signatures, private keys,
-B2 VersionIds, and presigned URLs. Re-embedding an identical capsule is byte-deterministic;
-conflicting, duplicate, malformed, oversized, or non-canonical capsules fail closed. PNG pixel data
-is preserved.
+<div align="center">
 
-The official `openai` SDK is pinned exactly. GPT Image requests select PNG output and consume the
-documented base64 result; DALL-E requests use their documented response-format option. The adapter
-also supports the official URL response shape through an HTTPS-only, hostname-allowlisted, bounded,
-non-redirecting download. Authentication, rate-limit, invalid-request, safety, timeout,
-unavailable, and malformed-response failures become safe normalized codes. Provider bytes,
-response bodies, URLs, and credentials are never logged or persisted. The deterministic fake
-provider is test-only, reports `ai_generated=false`, and cannot silently run in production.
+<img src="docs/assets/screenshots/landing-desktop.webp" alt="FIREMARK production landing page showing the headline 'Every AI asset ships with a Birth Certificate — or it doesn't ship at all', a sealed asset preview and a Birth Certificate card" width="900">
 
-Google Gemini and ElevenLabs use bounded, non-redirecting HTTPS adapters against their documented
-REST endpoints. Gemini accepts exactly one PNG. ElevenLabs requests `mp3_44100_128` and accepts
-only bounded `audio/mpeg` bytes. Their errors use the same safe normalized categories; credentials,
-prompts/text, response bodies, and URLs are excluded from logs and public records.
+*The product states its own contract: evidence before delivery.*
 
-### Google Gemini image generation
+<br>
 
-FIREMARK calls the Google Gemini API directly with a Google AI Studio key. The generation contract
-is the official Interactions API:
+<img src="docs/assets/screenshots/certificate-gemini.webp" alt="Public Birth Certificate page for the Gemini image, showing certificate ID, asset ID, run ID, signer key ID, sealed SHA-256 and canonical hash" width="760">
 
-```text
-POST https://generativelanguage.googleapis.com/v1beta/interactions
-x-goog-api-key: <GEMINI_API_KEY>
-Content-Type: application/json
-Accept: application/json
-Accept-Encoding: identity
+*A real public Birth Certificate. The sealed SHA-256 `27996070…89dc009e` and canonical hash `b6649ec6…0616a907` shown here match the safe multimodal report byte for byte — [verify it yourself](https://firemark-web.vercel.app/certificate/firemark-cert-977dce1a6b5b7add352854900ddac911).*
 
-{"model": "gemini-3.1-flash-image",
- "input": [{"type": "text", "text": "<prompt>"}],
- "response_format": {"type": "image", "mime_type": "image/jpeg",
-                     "aspect_ratio": "1:1", "image_size": "1K"}}
-```
+<br>
 
-This is exactly the shape the model's own documented image-generation examples use, and nothing
-more. The API key travels only in `x-goog-api-key`, no `Authorization: Bearer` header is ever sent,
-the model field never carries a duplicate `models/` prefix, and GMI Cloud is never contacted.
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/assets/screenshots/verify.webp" alt="FIREMARK verification page where a file is checked locally before any network call" width="100%">
+<p align="center"><em>Verify Gate — the decision that stands between an asset and its delivery.</em></p>
+</td>
+<td width="50%" valign="top" align="center">
+<img src="docs/assets/screenshots/landing-mobile.webp" alt="FIREMARK production landing page rendered on a 390 by 844 mobile viewport" width="46%">
+<p align="center"><em>Responsive at 390&nbsp;×&nbsp;844.</em></p>
+</td>
+</tr>
+</table>
 
-#### Only fields the model documents
+</div>
 
-The generic Interactions OpenAPI schema advertises `ResponseFormat` capabilities that no single
-model necessarily implements. `delivery` is one of them: it is valid in the generic schema but
-absent from the `gemini-3.1-flash-image` examples, and sending it was rejected with HTTP 400
-`INVALID_REQUEST`. `image/png` is likewise not a valid `ImageResponseFormat` MIME value.
+Every capture is reproducible: [`npm run capture:readme`](web/scripts/capture-readme-screenshots.mjs),
+with hashes and HTTP statuses recorded in [`manifest.json`](docs/assets/screenshots/manifest.json).
 
-The request builder therefore refuses to emit `delivery`, `stream`, `background`, `store`,
-`response_modalities`, `generationConfig`, `tools`, `previous_interaction_id` or `contents`, and a
-test asserts each one is absent from the wire bytes. FIREMARK asks for the accurate JPEG source and
-produces the PNG carrier itself.
+---
 
-#### Inline delivery and bounded transport
+## Why this is different
 
-The image arrives inline as Base64 in `output_image.data`, or in an `image` content block inside
-`steps`. Exactly one image is accepted, `status` must be `completed`, and the block MIME must be
-`image/jpeg`; anything else is `PROVIDER_SOURCE_MIME_UNSUPPORTED`. FIREMARK never relabels bytes it
-did not request and never fetches a second resource, so the API key is only ever presented to
-`generativelanguage.googleapis.com`.
+FIREMARK does not try to recognise AI media. It proves **exactly which bytes** were generated,
+sealed and delivered.
 
-The JSON body is read as a bounded HTTP/1.1 stream: redirects disabled, `Accept-Encoding: identity`
-so the byte ceiling stays meaningful, connect/write/pool timeouts capped at 30 s, a read timeout
-sized for one image generation, and a hard maximum enforced while iterating chunks. Truncated or
-malformed JSON fails closed with `INTERACTION_BODY_NOT_JSON`. Base64 JPEG is materially smaller than
-the equivalent PNG payload, but every limit is still enforced.
+| | Typical watermark | Metadata-only registry | **FIREMARK** |
+| --- | :--: | :--: | :--: |
+| Survives distrust of the issuing database | ✗ | ✗ | **✓** signature + immutable custody |
+| Verifies exact bytes | ✗ perceptual | ✗ references only | **✓** SHA-256 over real bytes |
+| Separates provider source from distributed artifact | ✗ | ✗ | **✓** dual-hash model |
+| Storage that cannot be silently rewritten | — | — | **✓** Object Lock COMPLIANCE |
+| Verification without uploading the file | ✗ | ✗ | **✓** FIREMARK Lens, in-browser |
+| Public certificate for third parties | — | ✓ | **✓** redacted public projection |
+| Delivery gated on verification | ✗ | ✗ | **✓** Verify Gate |
+| Media-aware contracts (image *and* audio) | — | — | **✓** distinct, honest per medium |
 
-#### Source versus sealed media
+The differentiator is the **complete lifecycle**. Sealing bytes is easy. Proving that the bytes
+you received are the bytes that were sealed — while the evidence itself sits somewhere nobody
+can rewrite — is the hard part.
 
-The provider source and the distributable sealed asset are different artifacts with different
-formats, different hashes and different storage:
+---
 
-| | Source | Sealed |
-| --- | --- | --- |
-| Format | `image/jpeg` (exact provider bytes) | `image/png` |
-| Hash | `source_sha256` | `sealed_sha256` |
-| Storage | private assets + COMPLIANCE vault, `.jpg` | content-addressed assets key, `.png` |
-| Capsule | none | `FiremarkPublicCapsuleV1` in a `tEXt` chunk |
+## Architecture
 
-`source_sha256` is always the SHA-256 of the untouched provider JPEG. It is never computed from the
-normalized PNG, and the two digests always differ. The public certificate describes the sealed PNG:
-`media_type: image`, `mime_type: image/png`, `sealed_sha256` of the capsule-bearing file, alongside
-the source digest that was already public by contract. `provider_source_mime_type` stays in private
-generation metadata, so representing a JPEG source needs no database migration.
+<div align="center">
+<img src="docs/assets/diagrams/system-architecture.svg" alt="FIREMARK system architecture across experience, control plane, generation, evidence, custody, database and public verification layers" width="960">
+</div>
 
-#### Deterministic PNG normalization
-
-`api/firemark/generation/normalization.py` decodes the validated JPEG source and re-encodes it as a
-PNG before capsule embedding. It runs entirely offline through pinned Pillow:
-
-```text
-Google JPEG source bytes → structural decode → deterministic PNG → capsule embedding → sealed PNG
-```
-
-It rejects malformed images, decompression bombs, excessive dimensions (>16384 px) and excessive
-pixel counts (>50 MP). Orientation is applied deterministically from EXIF, the pixel buffer is
-copied into a fresh image so no EXIF, comment, ICC profile or provider metadata survives, alpha is
-preserved only when the source genuinely carries it, and the PNG encoder uses fixed options so
-identical input always produces identical output. The only lossy step is decoding the JPEG the
-provider produced; FIREMARK adds none of its own.
-
-A PNG source — for example OpenAI GPT Image — is carried through untouched, so existing evidence
-stays byte identical and no normalization step is recorded for it.
-
-The private Genblaze manifest records the transformation on the generation step:
-
-```json
-{"operation": "normalize_image",
- "input_mime_type": "image/jpeg",
- "output_mime_type": "image/png",
- "purpose": "firemark_public_capsule_embedding"}
-```
-
-That record and `provider_source_mime_type` stay private. The prompt and other private
-transformation metadata are never exposed publicly.
-
-The certificate identity is exact:
-
-| Field | Value |
+| Layer | Responsibility |
 | --- | --- |
-| `provider` | `google_gemini` |
-| `model` | `gemini-3.1-flash-image` |
-| `provider_model_name` | `Nano Banana 2` |
-| `media_type` | `image` |
-| `mime_type` | `image/png` |
-| `ai_generated` | `true` |
+| **Experience** | Next.js App Router on Vercel. Server components for public pages, one client component for Verify Gate, one server-only route handler for delivery. |
+| **Control plane** | FastAPI on Railway. Five endpoints, zero-network construction, every external client lazy and injectable. |
+| **Generation** | Google Gemini (Nano Banana 2), ElevenLabs, OpenAI. Bounded, non-redirecting HTTPS adapters with normalized safe failure codes. |
+| **Evidence & sealing** | SHA-256 source digest → Genblaze canonical manifest → deterministic PNG carrier + public capsule → Ed25519 `SealEnvelopeV1`. |
+| **Custody** | Two separately credentialed private Backblaze B2 buckets; the vault under Object Lock COMPLIANCE. |
+| **Control-plane DB** | Supabase: six RLS tables, a service-role-only atomic registration RPC, a safe allowlisted public projection RPC. |
+| **Public verification** | Public certificate, Verify Gate, authorized delivery, Proof Packs. |
+| **Local verification** | FIREMARK Lens — PNG chunk parsing and Web Crypto hashing entirely in the browser. |
 
-A read-only model preflight is **diagnostic-only** and is not part of the generation path. A model
-listing can behave differently from the Interactions endpoint, so it must never block a valid
-generation. Read-only diagnostics live in a separate command that generates nothing and therefore
-costs nothing:
+Full component detail, sequence diagrams and trust boundaries: **[docs/architecture.md](docs/architecture.md)**.
 
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\diagnose_gemini_access.py
-D:\firemark\.venv\Scripts\python.exe scripts\diagnose_gemini_access.py --live
-```
+---
 
-The live diagnostic reads `v1beta/models` and `v1beta/models/{model}`. It prints HTTP status, the
-normalized safe category, a safe reason code, a transport-versus-endpoint failure domain, the
-configured model, whether that model appears in the listing, and bounded supported method names.
-It never prints the API key, a prompt, a raw response, a provider message, an authorization header,
-a request identifier, quota metadata, or account metadata.
+## Media-aware trust contracts
 
-Transport problems are never collapsed into a single category. Each relevant `httpx` failure class
-carries its own safe reason code, and an HTTP 5xx carries its real status instead:
+Most provenance tools pretend every medium behaves the same. They do not, and saying otherwise
+is a security claim you cannot keep.
 
-| Failure class | Normalized code | Safe reason code |
+<div align="center">
+<img src="docs/assets/diagrams/multimodal-hash-contracts.svg" alt="Image and audio hash contracts side by side, showing that the image sealed hash differs from its source while the audio sealed hash is identical" width="960">
+</div>
+
+**Images** — the FIREMARK public capsule is embedded into a deterministic PNG `tEXt` chunk, so the
+distributed container is *not* the provider's bytes. `source_sha256 ≠ sealed_sha256`, and that
+difference is enforced: a run where they matched would be rejected as `SEALED_HASH_UNCHANGED`.
+A sealed PNG carries its own proof and can be verified from the file alone.
+
+**Audio** — MP3 sealing is explicitly **byte-preserving**. No fake capsule is injected, so
+`source_sha256 == sealed_sha256` by design. Verification uses the public `cert_id` plus a locally
+computed SHA-256, and FIREMARK Lens marks the embedded-capsule layer `NOT CHECKED` rather than
+implying a proof it does not have.
+
+The capsule also deliberately **excludes** `sealed_sha256` — embedding a hash of the file into
+the file would create a circular dependency. It carries `source_sha256`, `canonical_hash`, the
+identifiers, the signer key ID and the verification URL. Nothing else.
+
+---
+
+## Backblaze B2 — the chain of custody
+
+B2 is not "where the files go." It is the reason a FIREMARK certificate means anything after the
+fact.
+
+<div align="center">
+<img src="docs/assets/diagrams/custody-model.svg" alt="Chain of custody across two Backblaze B2 buckets, with the vault under Object Lock COMPLIANCE and exact VersionIds bound into the signed envelope" width="960">
+</div>
+
+FIREMARK runs **two separately credentialed private buckets** with different capabilities:
+
+- The **assets bucket** holds operational copies and the sealed distributable. Its key can delete.
+- The **vault bucket** holds the provider source and the full canonical manifest under **Object
+  Lock COMPLIANCE** retention. Its key cannot bypass governance. Vault objects never enter any
+  cleanup path.
+
+Three properties make this custody rather than storage:
+
+1. **Retention is proved, not assumed.** Object Lock being *enabled* on a bucket only means the
+   bucket accepts retention parameters. FIREMARK claims custody only after it reads both object
+   retentions back from B2, confirms `COMPLIANCE` mode, confirms a sufficient retain-until date,
+   and re-downloads the exact bytes. COMPLIANCE retention cannot be shortened or bypassed by
+   FIREMARK itself.
+2. **Exact `VersionId`s are the evidence.** Every head, download and retention request carries the
+   exact version. Those versions are bound into the signed envelope, so a certificate points at a
+   specific immutable object generation — not at a mutable key.
+3. **Read-after-write is verified.** Uploads are re-downloaded and hash-checked under a bounded
+   shared retry budget. Only transient conditions retry; permission, credential, bucket, lock-mode,
+   expired-retention, wrong-version, malformed and hash failures fail immediately.
+
+Remove B2 and the trust model collapses to "trust our database." That is precisely the failure
+mode FIREMARK exists to eliminate.
+
+Implementation: [`api/firemark/b2_storage.py`](api/firemark/b2_storage.py),
+[`api/firemark/custody.py`](api/firemark/custody.py).
+
+---
+
+## Genblaze — canonical private provenance
+
+Genblaze produces the **canonical private record** of how an asset came to exist, and reduces it
+to one hash the public certificate can commit to without leaking anything.
+
+For each sealed asset FIREMARK builds a real Genblaze `Run` and `Manifest` containing the private
+prompt or TTS text, provider parameters, seed, modality, provider identity, the normalization step
+and the asset digest. `Manifest.verify()` must pass, and the resulting `canonical_hash` is bound
+into the Ed25519 envelope and published on the certificate.
+
+That single hash is the whole point of the split:
+
+- The **complete manifest stays private**, retained in the immutable B2 vault.
+- The **`canonical_hash` is public**, so anyone can confirm the certificate commits to *one*
+  specific provenance record.
+- Nobody can reconstruct the prompt from the hash, and nobody can swap the provenance without
+  breaking the signature.
+
+FIREMARK pins the authorized matrix exactly — `genblaze-core==0.3.8`, `genblaze-cli==0.3.6`,
+`genblaze-s3==0.3.6` — with public-protocol contract tests, and never imports underscore-prefixed
+Genblaze internals. Where the installed version cannot provide what custody requires (retention
+inspection, exact `VersionId` proof, corroborated delete denial, preflight-free presigning),
+FIREMARK implements those controls directly and documents why:
+[docs/upstream/genblaze-s3-compatibility-feedback.md](docs/upstream/genblaze-s3-compatibility-feedback.md).
+
+Implementation: [`api/firemark/genblaze_provenance.py`](api/firemark/genblaze_provenance.py).
+
+---
+
+## Security and trust model
+
+<div align="center">
+<img src="docs/assets/diagrams/trust-boundaries.svg" alt="Four trust zones: public evidence, private evidence, secrets that never leave the server, and immutable custody" width="960">
+</div>
+
+### What FIREMARK proves
+
+- The delivered bytes hash to the `sealed_sha256` in a signed certificate.
+- The certificate's envelope was signed by the holder of a specific Ed25519 private key, and binds
+  to the expected public-key fingerprint and `signer_key_id`.
+- The envelope commits to one canonical provenance record via `canonical_hash`.
+- The referenced source and manifest exist in immutable custody at exact `VersionId`s under active
+  COMPLIANCE retention.
+- The certificate has not been revoked at verification time.
+
+### What FIREMARK does not claim
+
+- **Not** that a provider's own provenance claims are true.
+- **Not** that the named signer was authorized to sign — that requires identity and operational
+  controls outside this milestone.
+- **Not** that generation occurred as described; it proves the evidence chain, not the world.
+- **Not** that an image is "real," "safe" or "true." FIREMARK is **tamper-evident**, not
+  tamper-proof.
+- **Not** that all media carries embedded proof — that is true for sealed PNG only.
+
+### Controls in the critical path
+
+Prompts, TTS text, API keys, bearer credentials, signing private keys, service-role keys, B2
+application keys, private manifests, raw provider responses and presigned URLs never appear in a
+public certificate, a log, a report, a checkpoint or an exception. Delivery URLs exist only in the
+successful HTTP serializer. Provider failures are normalized into safe codes carrying, at most, a
+status, an allowlisted reason token, an allowlisted exception class name and allowlisted structured
+field paths. Ordinary tests are **zero-network**.
+
+Full threat model: **[docs/trust-model.md](docs/trust-model.md)**.
+
+---
+
+## Who needs this
+
+| Who | The pain | The outcome |
 | --- | --- | --- |
-| `ConnectTimeout` | `timeout` | `TRANSPORT_CONNECT_TIMEOUT` |
-| `ReadTimeout` | `timeout` | `TRANSPORT_READ_TIMEOUT` |
-| `WriteTimeout` | `timeout` | `TRANSPORT_WRITE_TIMEOUT` |
-| `PoolTimeout` | `timeout` | `TRANSPORT_POOL_TIMEOUT` |
-| `ProxyError` | `unavailable` | `TRANSPORT_PROXY_FAILURE` |
-| `ConnectError` | `unavailable` | `DNS_RESOLUTION_FAILURE` or `TRANSPORT_CONNECT_FAILURE` |
-| `ReadError` | `unavailable` | `TRANSPORT_READ_FAILURE` |
-| `WriteError` | `unavailable` | `TRANSPORT_WRITE_FAILURE` |
-| `RemoteProtocolError` | `unavailable` | `TRANSPORT_REMOTE_PROTOCOL_FAILURE` |
-| `LocalProtocolError` | `unavailable` | `TRANSPORT_LOCAL_PROTOCOL_FAILURE` |
-| `DecodingError` | `unavailable` | `TRANSPORT_DECODING_FAILURE` |
-| any other `TransportError` | `unavailable` | `TRANSPORT_FAILURE` |
+| **Creators & agencies** | "Prove this deliverable is the file you approved." | A public certificate travels with the work. |
+| **Media & newsrooms** | AI disclosure that survives republication. | Byte-level provenance on the record. |
+| **Education & research** | Attributing generated material honestly. | Verifiable origin without exposing prompts. |
+| **Marketplaces** | Listings backed by unverifiable claims. | Gate publication on a passing Verify Gate. |
+| **Enterprise content ops** | "What shipped, when, from which model?" | An auditable trail with immutable custody. |
+| **AI platforms & model providers** | Provenance bolted on after the fact. | Issue certificates at generation time via API. |
+| **Legal & audit** | Screenshots are not evidence. | Signed records against retained originals. |
 
-Only the normalized code, HTTP status when available, safe reason code, the exception class name
-from a strict allowlist, and allowlisted structured field paths are persisted. Exception messages,
-`repr`, requests, responses, headers, prompts and API keys are never stored.
+---
 
-#### Safe Google error details
+## Production evidence
 
-A bare `HTTP_400` cannot be diagnosed. For non-2xx responses FIREMARK extracts exactly two
-structured facts and nothing else:
+Every row below is backed by a safe report committed in this repository or by a tagged checkpoint.
 
-| Source | Validation |
+**Deployed-stack smoke — 14/14 stages PASS** *(read-only, reused an existing certificate; `new_provider_calls: 0`)*
+
+| Stage | Result | Stage | Result |
+| --- | :--: | --- | :--: |
+| Configuration validation | ✅ | Public certificate API | ✅ |
+| Backend health | ✅ | Public verify API | ✅ |
+| Frontend landing | ✅ | Frontend delivery route | ✅ |
+| Frontend verify page | ✅ | Delivered asset download | ✅ |
+| Frontend certificate page | ✅ | Delivered SHA-256 verification | ✅ |
+| Response header security | ✅ | Embedded capsule verification | ✅ |
+| Secret leak scan | ✅ | Safe report | ✅ |
+
+**Multimodal lifecycle — both operations complete**
+
+| | Google Gemini · Nano Banana 2 | ElevenLabs |
+| --- | --- | --- |
+| Certificate | `firemark-cert-977dce1a6b5b7add352854900ddac911` | `firemark-cert-e0c6fbf7bfc482f765c636963cfcbbbf` |
+| Media | `image` · sealed `image/png` · source `image/jpeg` | `audio` · `audio/mpeg` |
+| Hash contract | `source ≠ sealed` ✅ | `source = sealed` ✅ |
+| Stages | 17/17 PASS | 16/16 PASS |
+| Provider calls | 1 (recorded) | 1 (recorded) |
+| B2 custody · Supabase | ✅ · ✅ | ✅ · ✅ |
+
+<details>
+<summary><strong>Reproducibility</strong></summary>
+
+<br>
+
+| Item | Value |
 | --- | --- |
-| `error.status` | `[A-Z0-9_]{1,64}` |
-| `google.rpc.BadRequest` → `fieldViolations[].field` | `[A-Za-z0-9_.\[\]-]{1,160}`, at most 16 |
+| Verified commit | `266e429a938cb47d65ff5b5addf80f8bed90b1e7` |
+| Production checkpoint tag | `checkpoint-production-multimodal-stack` |
+| Multimodal checkpoint tag | `checkpoint-multimodal-generation-live` |
+| Deployed-stack report SHA-256 | `776e2c21ce7ca2d1125fde06a82ae0ae2b78ccf3d1850e4d4831465ecc9d609d` |
+| Safe reports | [`deployed-stack-report.json`](.artifacts/deployed-stack-report.json) · [`multimodal-generate-and-seal-report.json`](.artifacts/multimodal-generate-and-seal-report.json) |
 
-They surface as machine-readable lines:
+Both reports exclude prompts, TTS text, credentials, headers, private manifests, provider responses
+and transient URLs by construction — the report writer refuses to serialize a payload containing
+forbidden markers.
 
-```text
-PROVIDER_ERROR_STATUS=INVALID_ARGUMENT
-PROVIDER_INVALID_FIELDS=response_format.delivery
-```
+</details>
 
-`error.message`, the field-violation description, raw details, the raw response, the request body,
-the prompt, the API key, the interaction ID and headers are never persisted or printed. A field name
-is never invented when Google does not supply one; unvalidated paths are dropped silently.
+---
 
-The isolated smoke submits at most one generation request only when `--live` is explicitly supplied:
+## 60-second demo
 
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_gemini_image_provider.py
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_gemini_image_provider.py --live
-```
+1. **Open** [firemark-web.vercel.app](https://firemark-web.vercel.app) — the product states its own contract.
+2. **Inspect** the [Gemini Birth Certificate](https://firemark-web.vercel.app/certificate/firemark-cert-977dce1a6b5b7add352854900ddac911) — certificate ID, both hashes, canonical hash, signer key ID, status.
+3. **Compare** it with the [ElevenLabs certificate](https://firemark-web.vercel.app/certificate/firemark-cert-e0c6fbf7bfc482f765c636963cfcbbbf) — same structure, different hash contract.
+4. **Verify** at [/verify](https://firemark-web.vercel.app/verify) — drop a sealed PNG and watch the layers resolve locally.
+5. **Tamper** — flip one byte and watch delivery get blocked.
+6. **Download a Proof Pack** — public certificate, Ed25519 public key, offline QR, instructions. No media, no bearer, no presigned URL.
 
-It writes `.artifacts/gemini-image-provider-checkpoint.json` atomically before submission, after a
-definitive provider rejection, and immediately after valid source bytes are received. The exact
-provider JPEG is stored as `source.jpg` under the ignored
-`.artifacts/gemini-image-provider-private/` tree. Once bytes exist, recovery reuses them and Gemini
-is never called again.
+Full script with fallbacks: **[docs/demo.md](docs/demo.md)**.
 
-The stage table reports thirteen safe stages:
+---
 
-```text
-configuration_validation        interaction_submission          deterministic_png_normalization
-request_construction            inline_metadata_validation      normalized_png_validation
-prior_checkpoint_classification inline_jpeg_base64_validation   checkpoint_completion
-definitive_checkpoint_archival  jpeg_validation
-checkpoint_before_submission    source_hash
-```
+## Developer quickstart
 
-Safe output includes the provider, configured model, provider model name, operation ID, HTTP status,
-Google error status, invalid field paths, normalized category, safe reason code, source MIME, sealed
-MIME, source byte size, normalized PNG byte size, source hash and the exact new generation request
-count. It never includes the prompt, API key, raw response or exception message.
-
-#### Retrying an operation versus starting a new one
-
-These are different decisions and FIREMARK keeps them separate.
-
-| Prior state | Meaning | Command |
-| --- | --- | --- |
-| First definitive rejection | The provider refused and produced nothing. One retry remains. | `--allow-definitive-retry` |
-| Exhausted definitive rejection | The provider refused again. The operation is spent. | `--start-new-operation-after-definitive` |
-| Ambiguous outcome | A timeout, a lost connection after submission, or an uncaptured result. Generation may already be billed. | `--start-new-operation-after-ambiguous` |
-
-A checkpoint that cannot continue is **never** retried in place and never rewritten — the run does
-not even update its stage rows. `--allow-definitive-retry` cannot unblock an exhausted or ambiguous
-record, and neither new-operation option accepts a state it was not designed for.
-
-To move forward, an operator explicitly starts a *new* operation. This is a new billable
-generation, not a retry:
+**Requirements:** Python 3.12, Node 20.9+.
 
 ```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_gemini_image_provider.py --live `
-  --start-new-operation-after-definitive
-```
-
-Both options require `--live`. They atomically move the preserved record, byte for byte, to
-`.artifacts/gemini-image-provider-checkpoints/gemini-image-provider-definitive-<UTC>.json` (or
-`-ambiguous-<UTC>.json`), mint a new operation ID, and allow exactly one new submission. The archive
-is never edited, never marked retryable, and never discarded; it stays inside the ignored
-`.artifacts/` tree. If the new operation also fails, it fails closed again and needs fresh
-authorization.
-
-Generation and delivery use distinct `SecretStr` bearer credentials and constant-time comparison.
-Missing or invalid bearer credentials return 401; public health, Birth Certificate, and Verify
-routes remain anonymous. The prompt is sent only to the selected provider and retained only in the
-private generation run.
-
-## Public web experience
-
-The Next.js App Router application lives in `web/`. It uses React Server Components for the
-landing and certificate routes, a focused Client Component for Verify Gate interaction, and one
-server-side route handler for authenticated delivery. The browser calls only the public
-certificate and verification endpoints. It never receives `FIREMARK_DELIVERY_API_KEY`; the route
-handler exchanges that server-only bearer for a short-lived URL after FastAPI independently
-repeats verification.
-
-| Surface | Route | Purpose |
-| --- | --- | --- |
-| Landing | `/` | Product thesis, Generate & Seal, Birth Certificate, and Verify Gate. |
-| Certificate | `/certificate/[certId]` | Redacted public certificate with trust summary and technical details. |
-| Verify Gate | `/verify` | Certificate and optional sealed-hash verification. |
-| Delivery proxy | `POST /api/delivery/[certId]` | Server-only authenticated delivery exchange. |
-| Proof Pack | `GET /api/proof-pack/[certId]` | Ephemeral ZIP containing public verification evidence. |
-
-The typed frontend client validates certificate IDs, SHA-256 digests, safe response shapes, public
-manifest fields, and URL schemes. Requests have bounded timeouts and normalized errors; raw
-backend exceptions are not shown. Short-lived delivery URLs remain only in the successful browser
-response and component memory. They are not logged or written to storage.
-
-### FIREMARK Lens and Public Proof Packs
-
-FIREMARK Lens makes file verification the primary `/verify` experience. The browser accepts only
-PNG files up to 25 MiB, reads PNG chunks and CRCs locally, extracts the exact
-`FiremarkPublicCapsuleV1` canonical `tEXt` payload, and calculates the complete file SHA-256 through
-Web Crypto. A Web Worker performs hashing when available, with a main-thread Web Crypto fallback.
-The selected bytes, filename, local path, and calculated evidence are never uploaded, logged, or
-persisted. Only `{cert_id, presented_sha256}` is sent to the existing public Verify API.
-
-Lens reports eight independent layers: file format, embedded capsule, sealed hash, certificate
-presence, Ed25519 signature, certificate status, B2 custody reference, and delivery eligibility.
-Local parsing never claims to prove remote custody; the final decision comes from Verify Gate.
-Missing or malformed capsules stop before any API call, while modified, revoked, and unregistered
-assets remain blocked.
-
-The audio mode accepts bounded MP3 files, validates and hashes them locally, and requires the user
-to supply the public `cert_id`. It transmits only `{cert_id, presented_sha256}` and marks the
-embedded-capsule layer `NOT CHECKED`. After a successful Verify Gate decision, the short-lived
-delivery URL may feed an in-memory browser audio player and is never persisted.
-
-An active Birth Certificate offers `Download Proof Pack`. Its server-side route fetches only the
-public certificate projection and creates an in-memory ZIP containing `certificate.json`, a text
-summary, Ed25519 public key, locally generated SVG QR code, and verification instructions. It
-fetches no media, uses no backend bearer, creates no presigned URL, and persists nothing.
-
-Three-minute demo flow:
-
-1. Open a public Birth Certificate and download its Proof Pack.
-2. Open `/verify`, show the local-processing privacy badge, and drop the valid sealed PNG.
-3. Show the automatically discovered certificate, local hash, eight PASS layers, and enabled delivery.
-4. Select the one-byte-modified demo fixture and show hash mismatch with delivery blocked.
-5. Select the no-capsule PNG and show that Lens stops locally without calling Verify Gate.
-6. Open the Proof Pack and show its five public-only entries and offline QR code.
-
-FastAPI CORS is driven by `FIREMARK_ALLOWED_ORIGINS`, a strict JSON list. HTTPS origins are
-required except for explicit `localhost`, `127.0.0.1`, or `::1` development origins. Wildcards,
-credentials in origins, paths, queries, fragments, and credentialed CORS are rejected. The default
-allows only `http://localhost:3000` and `http://127.0.0.1:3000`. Application construction remains
-zero-network.
-
-## Genblaze local provenance roundtrip
-
-The roundtrip creates a deterministic local PNG fixture. The fixture is not AI-generated, is not
-provider-generated, and is never production evidence. It builds a real Genblaze Run and Manifest
-through the installed public builders, embeds the complete Manifest into a PNG, extracts and
-verifies it, and binds its hashes into a signed FIREMARK Seal Envelope.
-
-The Genblaze asset digest and FIREMARK container digest cover different bytes:
-
-- The Genblaze output `Asset.sha256` equals `source_sha256`, the digest of the PNG before embedding.
-- `sealed_sha256` is the digest of the final full-manifest PNG after Genblaze adds its iTXt chunk.
-- `Manifest.verify()` verifies the canonical Manifest and declared digest coverage. It does not
-  re-hash the post-embedding PNG container.
-- FIREMARK binds the final distributed container through `sealed_sha256` in its signed envelope.
-
-Genblaze 0.3.8 supports two materially different payloads. Full mode embeds the complete,
-independently verifiable Manifest inline in PNG metadata. Privacy redaction cannot remain a full
-Manifest because removing prompt, parameters, or seed would invalidate its canonical hash. The
-installed `EmbedPolicy` therefore requires pointer mode, which emits only `schema_version`,
-`canonical_hash`, and a local fixture `manifest_uri`. In 0.3.8, `SmartEmbedder` stores that pointer
-as a `.genblaze.json` sidecar and leaves the corresponding public PNG bytes unchanged. Durable
-pointer resolution is provided by the B2 Custody Kernel, while public capsule publication remains
-deferred.
-
-## B2 Custody Kernel
-
-FIREMARK uses two separately credentialed private buckets:
-
-- The assets bucket contains normal source objects and full private manifests. These objects can be
-  downloaded through short-lived presigned GET URLs and cleaned up deliberately.
-- The vault bucket contains the same source evidence and full manifests under COMPLIANCE Object
-  Lock. Vault objects are never sent through generic cleanup paths.
-
-The deterministic key layout is:
-
-```text
-assets/{sha256[0:2]}/{sha256[2:4]}/{sha256}.{extension}
-manifests/{run_id}/{canonical_hash}.json
-public/{cert_id}/pointer.json
-public/{cert_id}/signed-envelope.json
-public/{cert_id}/custody-receipt.json
-vault/sources/{sha256[0:2]}/{sha256[2:4]}/{sha256}.{extension}
-vault/manifests/{run_id}/{canonical_hash}.json
-```
-
-The Genblaze `canonical_hash` identifies the canonical manifest contract. FIREMARK separately
-hashes the complete serialized manifest bytes for storage integrity; these digests have different
-coverage and must not be conflated.
-
-Object Lock enabled on a bucket only means the bucket can accept retention parameters. FIREMARK
-claims active custody only after reading both object retentions back from B2, confirming
-`COMPLIANCE`, confirming a sufficient retain-until date, and re-downloading the exact bytes.
-COMPLIANCE retention cannot be shortened or bypassed by FIREMARK. A retained smoke object remains
-stored and billable until its retention expires.
-
-Assets and vault application keys must be different and scoped to their respective private
-buckets. The vault key must be able to write retained versions, read retention, head and download
-objects, and attempt normal deletion without a governance-bypass capability. The assets key needs
-normal private read, write, head, and delete capabilities. Never make either bucket public.
-
-### Accepted Genblaze version matrix
-
-The authorized matrix is `genblaze-core==0.3.8`, `genblaze-cli==0.3.6`, and
-`genblaze-s3==0.3.6`. Adapter metadata declares `genblaze-core>=0.3.4,<0.4`; public protocol tests
-pin this relationship. The upstream adapter internally imports `genblaze_core._version`. FIREMARK
-accepts that upstream implementation risk only with exact pins and contract tests, and FIREMARK
-source never imports underscore-prefixed Genblaze modules itself.
-
-FIREMARK uses public `S3StorageBackend` and `ObjectStorageSink` integration for normal Genblaze
-pipeline compatibility. Direct boto3 calls implement custody controls because genblaze-s3 0.3.6
-does not expose sufficient retention inspection, exact VersionId proof, or corroborated delete
-denial. FIREMARK also uses boto3 presigning because genblaze-s3 `presigned_get()` performs a remote
-preflight even when constructed with `preflight=False`.
-
-## Local setup
-
-Use Python 3.12 from Windows PowerShell:
-
-```powershell
-cd D:\firemark
+git clone https://github.com/jpablortiz96/firemark.git
+cd firemark
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
-Copy-Item .env.example .env
+Copy-Item .env.example .env      # variable names only — never commit real values
 python -m pytest
-python -m pytest --cov=api.firemark --cov-report=term-missing --cov-fail-under=95
-python -m ruff check .
-python -m mypy api scripts
-python scripts\smoke_trust.py
-python scripts\smoke_genblaze_roundtrip.py
-python scripts\smoke_b2_custody.py --help
-python scripts\smoke_b2_custody.py
-python scripts\smoke_generate_and_seal.py --help
-python scripts\smoke_generate_and_seal.py
 ```
 
-Start the local API with the injected in-memory repository and no external checks:
+Run the backend with the in-memory repository (no external service, no credentials):
 
 ```powershell
-D:\firemark\.venv\Scripts\python.exe -m uvicorn api.firemark.app:create_app `
-  --factory --host 127.0.0.1 --port 8000
+python -m uvicorn api.firemark.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-OpenAPI is available locally at `http://127.0.0.1:8000/docs`. The default in-memory process starts
-empty; certificate registration is an internal service operation, not a public endpoint.
+OpenAPI is served at `http://127.0.0.1:8000/docs`.
 
-For the Supabase checkpoint, create a disposable project manually, review and apply the migration
-through the Supabase CLI, then configure these ignored local values:
-
-```text
-SUPABASE_URL=
-SUPABASE_PUBLISHABLE_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
-FIREMARK_PUBLIC_BASE_URL=
-FIREMARK_DELIVERY_TTL_SECONDS=
-FIREMARK_REPOSITORY_BACKEND=
-FIREMARK_ADMIN_API_KEY=
-FIREMARK_DELIVERY_API_KEY=
-FIREMARK_SIGNING_PRIVATE_KEY_B64=
-FIREMARK_SIGNING_PUBLIC_KEY_B64=
-OPENAI_API_KEY=
-OPENAI_IMAGE_MODEL=
-OPENAI_IMAGE_SIZE=
-GEMINI_API_KEY=
-GEMINI_IMAGE_MODEL=
-ELEVENLABS_API_KEY=
-ELEVENLABS_VOICE_ID=
-ELEVENLABS_MODEL_ID=
-FIREMARK_GENERATION_TIMEOUT_SECONDS=
-FIREMARK_MAX_GENERATED_IMAGE_BYTES=
-FIREMARK_MAX_GENERATED_AUDIO_BYTES=
-FIREMARK_ALLOWED_ORIGINS=
-```
-
-Prefer a current `sb_publishable_` public key and a distinct current `sb_secret_` backend key.
-Legacy Supabase JWT keys remain compatible only when their embedded role is respectively `anon` or
-`service_role`; role-mismatched and unknown key families fail closed. Do not place the backend key
-in a browser, public certificate, log, fixture, or committed file.
-Configuration failures print only field status, safe reason codes, URL hostnames, and key-family
-labels; they never print credential values, JWT claims, or complete URLs.
-
-Review the zero-network behavior first, then let a single owner run the live checkpoint:
+Run the frontend:
 
 ```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_supabase_control_plane.py
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_supabase_control_plane.py --live `
-  --output-report .artifacts\supabase-control-plane-report.json --force
-```
-
-Without `--live`, the command constructs no Supabase client, performs no network request, and exits
-with informational code 2. The live run creates uniquely named synthetic local-fixture rows, proves
-private-table RLS and the public RPC allowlist, exercises atomic and idempotent registration,
-rejects a conflicting duplicate, appends one verification event and one URL-free blocked delivery
-event, and revokes the smoke certificate. It makes no provider or B2 request. The safe report omits
-credentials, private evidence, signed envelopes, prompts, parameters, manifests, authorization
-headers, and URLs.
-
-If that live checkpoint has already persisted its atomic bundle and event rows but stops before
-revocation, do not repeat the original smoke. Resume only the existing unambiguous bundle:
-
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\resume_supabase_control_plane_checkpoint.py
-D:\firemark\.venv\Scripts\python.exe scripts\resume_supabase_control_plane_checkpoint.py --live `
-  --output-report .artifacts\supabase-control-plane-report.json --force
-```
-
-The resume command performs no registration RPC and inserts no verification or delivery event. It
-validates existing row counts and the public allowlist, revokes through the service-role repository,
-proves the revoked Verify Gate result locally, scans only the smoke rows for secret material, and
-writes the final safe report. An identical prior checkpoint revocation is accepted idempotently;
-missing, ambiguous, or differently revoked bundles fail closed.
-
-The `.env` file is optional for ordinary tests. If used, populate it locally and never commit it.
-The settings loader reads process environment variables explicitly; it does not automatically load
-the `.env` file. Only explicitly live CLI checkpoints load the ignored repository `.env`.
-
-Configure the local web application separately in ignored `web/.env.local`:
-
-```text
-NEXT_PUBLIC_FIREMARK_API_BASE_URL=http://127.0.0.1:8000
-FIREMARK_DELIVERY_API_KEY=
-FIREMARK_PUBLIC_SITE_URL=http://localhost:3000
-```
-
-Only `NEXT_PUBLIC_FIREMARK_API_BASE_URL` is browser-visible. The delivery bearer and public site
-configuration stay server-side. Start both local processes in separate PowerShell terminals:
-
-```powershell
-D:\firemark\.venv\Scripts\python.exe -m uvicorn api.firemark.app:create_app `
-  --factory --host 127.0.0.1 --port 8000
-```
-
-```powershell
-cd D:\firemark\web
+cd web
 npm install
 npm run dev
 ```
 
-Run the frontend quality gate with:
+Configure `web/.env.local` — only the API base is browser-visible:
 
-```powershell
-cd D:\firemark\web
-npm run lint
-npm run typecheck
-npm run test
-npm run build
+```text
+NEXT_PUBLIC_FIREMARK_API_BASE_URL=http://127.0.0.1:8000
+FIREMARK_DELIVERY_API_KEY=          # server-only, never NEXT_PUBLIC_
+FIREMARK_PUBLIC_SITE_URL=http://localhost:3000
 ```
 
-Review the non-live Generate & Seal command first. It constructs no provider, B2, or Supabase
-client and exits with informational code 2. The explicitly live command makes exactly one real
-OpenAI image request and may incur provider and storage cost:
+### Public API
 
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal.py
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal.py --live `
-  --output-report .artifacts\generate-and-seal-report.json --force
+```bash
+# Read a public Birth Certificate — no authentication
+curl https://firemark-api-production.up.railway.app/v1/certificates/<CERT_ID>
+
+# Verify a file you hold locally
+curl -X POST https://firemark-api-production.up.railway.app/v1/verify \
+  -H 'Content-Type: application/json' \
+  -d '{"cert_id":"<CERT_ID>","presented_sha256":"<SHA256_OF_YOUR_FILE>"}'
 ```
 
-The live checkpoint verifies source, canonical, sealed, signature, custody, registration, public
-projection, Verify Gate, authenticated delivery, delivered bytes, embedded capsule, and a bounded
-database credential scan. Its safe report includes evidence identifiers, hashes, safe object keys,
-VersionIds, retention timestamps, package versions, and stage results. It excludes the prompt,
-all credentials and bearer headers, signing private material, full private Manifest, provider
-response, and raw delivery URL.
+Sealing is admin-authenticated and idempotent:
 
-The multimodal checkpoint proves one Google Gemini PNG and one ElevenLabs MP3 without using OpenAI or an
-alternate provider. Its non-live mode constructs no external client and exits with informational
-code 2. Live mode uses separate atomic checkpoints, persists generated bytes before B2 or Supabase,
-and resumes each modality independently without issuing a second provider request:
-
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_multimodal_generate_and_seal.py
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_multimodal_generate_and_seal.py --live `
-  --output-report .artifacts\multimodal-generate-and-seal-report.json --force
+```bash
+curl -X POST https://firemark-api-production.up.railway.app/v1/generate-and-seal \
+  -H 'Authorization: Bearer <FIREMARK_ADMIN_API_KEY>' \
+  -H 'Idempotency-Key: <SAFE_UNIQUE_KEY>' \
+  -H 'Content-Type: application/json' \
+  -d '{"media_type":"image","provider":"google_gemini","prompt":"<PROMPT>"}'
 ```
 
-#### Finalization and `--resume-existing`
+Deeper material: **[deployment runbook](docs/deployment.md)** ·
+**[frontend architecture](docs/frontend-architecture.md)** ·
+**[trust model](docs/trust-model.md)**.
 
-After both operations complete, finalization runs four stages of its own —
-`multimodal_evidence_validation`, `report_serialization`, `report_secret_scan` and
-`checkpoint_finalization`. They exist so a terminal defect is reported against the step that
-actually failed. A failure there is never attributed to a provider configuration stage.
+<details>
+<summary><strong>Quality gates and safe local checkpoints</strong></summary>
 
-The report's secret scan validates stage rows structurally against the declared stage tuples
-instead of substring-scanning them. Stage labels such as `gemini_private_manifest` are FIREMARK's
-own vocabulary describing a step; they never carry the manifest, and matching them as if they were
-provider data previously failed a completely successful run.
-
-When both checkpoints are already `complete`, finalize the run without touching any provider:
+<br>
 
 ```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_multimodal_generate_and_seal.py `
-  --resume-existing --output-report .artifacts\multimodal-generate-and-seal-report.json --force
+python -m pytest
+python -m pytest --cov=api.firemark --cov-report=term-missing --cov-fail-under=95
+python -m ruff check .
+python -m mypy api scripts
+cd web; npm test; npm run lint; npm run typecheck; npm run build
 ```
 
-This needs no `--live`: it constructs no Gemini, ElevenLabs, B2 or Supabase client, reads only the
-persisted safe checkpoints, revalidates the complete evidence, writes the report and exits 0. It
-prints `NEW_GEMINI_CALLS=0` and `NEW_ELEVENLABS_CALLS=0`, while `recorded_gemini_calls` and
-`recorded_elevenlabs_calls` preserve the single provider call each original operation made. Adding
-`--live` resumes stages that are still incomplete through the existing recovery path, which reuses
-persisted bytes and never issues a second provider request.
-
-The Google Gemini checkpoint verifies its embedded public PNG capsule. The ElevenLabs checkpoint confirms
-the byte-preserving MP3 strategy and the detached `cert_id + sha256` verification contract. Both
-paths validate exact B2 VersionIds, COMPLIANCE retention, Supabase registration, public projection,
-Verify Gate, authenticated delivery, and delivered-byte integrity. If a provider call starts but
-its outcome cannot be durably captured, recovery fails closed instead of risking a duplicate call.
-
-The full live smoke writes `.artifacts/generate-and-seal-checkpoint.json` atomically before its
-first remote write and updates it after custody, sealed-asset persistence, registration, and final
-verification. Raw source and private Manifest working files are stored separately under the
-ignored `.artifacts/generate-and-seal-private/` tree; the safe checkpoint contains only recovery
-identifiers, hashes, exact object versions, retention timestamps, and local paths. It never stores
-the prompt, credentials, private key, provider response, object bytes, or a transient URL.
-
-If a production Generate & Seal operation stops after provider generation, do not repeat the live
-smoke and do not make another provider request. Review the provider-free command first, then let a
-single owner explicitly resume the checkpoint:
+Zero-network local proofs (no provider, no cost):
 
 ```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\resume_generate_and_seal_checkpoint.py
-D:\firemark\.venv\Scripts\python.exe scripts\resume_generate_and_seal_checkpoint.py --live `
-  --output-report .artifacts\generate-and-seal-report.json --force
+python scripts\smoke_trust.py               # local Ed25519 behaviour
+python scripts\smoke_genblaze_roundtrip.py  # Genblaze contract roundtrip
+python scripts\diagnose_gemini_access.py    # read-only provider diagnostics
 ```
 
-Non-live recovery exits with informational code 2 and constructs no OpenAI, B2, or Supabase
-client. Live recovery never constructs or calls OpenAI. It reads the safe checkpoint first,
-validates bounded exact vault versions and their active COMPLIANCE retention, reconstructs the
-same capsule and sealed bytes, reuses an identical sealed version when present, registers the
-certificate atomically and idempotently, and completes verification and delivery. It never creates
-a new vault source or Manifest version, changes retention, deletes a vault object, or persists a
-delivery URL. A pre-checkpoint legacy bundle can be discovered through B2, but recovery returns
-`INCOMPLETE_EVIDENCE` without writes when exact capsule IDs or timestamps cannot be recovered.
+Every live checkpoint is gated behind an explicit `--live`. Without it, no client is constructed
+and the command exits with informational code **2**. Live commands persist atomic state before
+submission and immediately after valid bytes, so an interrupted run resumes from persisted
+evidence instead of re-billing a provider. An ambiguous outcome fails closed and requires explicit
+operator authorization to start a new operation — it is never silently retried.
 
-Exact-version read-after-write verification uses one shared bounded retry budget: at most five
-attempts and ten seconds total with short backoff. Only temporary `NoSuchKey`, `NoSuchVersion`,
-`NotFound`, absent immediate retention, and retryable transport failures are retried. Permission,
-credential, bucket, Object Lock mode, expired retention, wrong VersionId, malformed response, and
-hash failures fail immediately. Every head, download, and retention request includes the exact
-VersionId, and retention timestamps are normalized to UTC with safe sub-second service
-normalization.
+</details>
 
-When Generate & Seal reaches B2 but fails before registration, isolate custody without repeating
-the provider request or contacting Supabase:
+---
 
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal_b2.py
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_generate_and_seal_b2.py --live `
-  --output-report .artifacts\generate-and-seal-b2-report.json --force
+## Business model
+
+FIREMARK is built as infrastructure, and infrastructure monetizes on volume and retention. None of
+the following is implemented billing today; it is the commercial shape the architecture already
+supports.
+
+| Layer | Model |
+| --- | --- |
+| **Public verification** | Free, forever. Trust networks need an unpriced verification path. |
+| **Developer API** | Per sealed certificate. The unit of value is one asset entering the evidence chain. |
+| **Teams** | Asset history, workspaces, revocation controls, shared audit views. |
+| **Enterprise** | Extended retention windows, private deployment, custody policy, audit export, SSO. |
+| **Custody tiers** | Retention duration and volume — the immutable vault is a recurring, sticky cost centre. |
+| **SDKs & white-label** | Embedded verification in someone else's product surface. |
+| **Platform integrations** | Model providers and marketplaces issuing certificates at generation time. |
+
+The strategic wedge is the last row: whoever verifies at the moment of generation owns the
+provenance layer for everything downstream.
+
+---
+
+## Defensibility
+
+Wrapping an AI provider is a weekend. This is not that.
+
+- **Custody architecture.** Immutable retention proved by read-back, exact `VersionId` binding and
+  corroborated delete denial — not an upload call.
+- **Dual-hash evidence model.** Source and sealed digests with separate, enforced roles.
+- **Signed canonical provenance.** A private manifest reduced to one public hash inside a signed
+  envelope.
+- **Media-aware contracts.** Honest, distinct verification per medium — and the discipline to say
+  `NOT CHECKED` where a proof does not exist.
+- **Recovery-safe generation.** Atomic checkpoints, exactly-once provider calls, fail-closed
+  ambiguity handling. Expensive to retrofit, invisible until it saves you.
+- **Public/private evidence separation** enforced at the database boundary by RLS and an
+  allowlisted projection RPC, not by application convention.
+- **Integrations in the critical path.** Backblaze B2 and Genblaze are not swappable add-ons; the
+  trust model is defined in terms of what they guarantee.
+
+---
+
+## Roadmap
+
+Not shipped. Direction, stated honestly.
+
+- Video sealing and verification contracts
+- C2PA interoperability
+- Batch sealing and bulk certificate issuance
+- Organization workspaces and delegated chain of custody
+- Official SDKs (TypeScript, Python)
+- Browser extension for inline verification
+- Marketplace and model-provider integrations
+- Policy automation for retention and revocation
+
+---
+
+## Repository map
+
+```text
+api/firemark/            FastAPI backend
+  ├─ api/routes/         health · certificates · verify · delivery · generate
+  ├─ control_plane/      models, service, Supabase + in-memory repositories
+  ├─ generation/         Gemini · ElevenLabs · OpenAI adapters, normalization
+  ├─ b2_storage.py       bounded B2 client, exact-version operations
+  ├─ custody.py          Object Lock COMPLIANCE custody workflow
+  ├─ genblaze_provenance.py   canonical private manifests
+  ├─ public_capsule.py   FiremarkPublicCapsuleV1 embed/extract
+  ├─ seal_envelope.py    SealEnvelopeV1 + Ed25519 signing
+  └─ generate_and_seal.py  end-to-end orchestration
+web/                     Next.js App Router frontend
+  ├─ src/app/            landing · /verify · /certificate/[certId]
+  ├─ src/lib/            typed API client, FIREMARK Lens, Proof Packs
+  └─ scripts/            reproducible README screenshot capture
+supabase/migrations/     RLS schema + atomic registration RPCs
+scripts/                 smokes, diagnostics, recovery-safe checkpoints
+tests/                   882 zero-network tests
+docs/                    architecture · trust model · demo · deployment
 ```
 
-The live B2-only checkpoint uses deterministic local fixture provenance, retains only its source
-and private Manifest versions under COMPLIANCE, verifies every exact version, and deletes the
-temporary sealed assets version by exact VersionId. It makes no OpenAI or Supabase request and
-never deletes a vault version.
+---
 
-Configure two private buckets locally by copying `.env.example` to `.env`. The vault bucket must
-have Object Lock enabled when it is created. Use one-day retention only for a deliberate
-development smoke run; the current production target is 90 days and must be selected explicitly.
+## Quality
 
-Run real B2 verification only after reviewing costs and capabilities:
+| Gate | Result |
+| --- | --- |
+| Tests | **881 passed, 1 skipped** |
+| Coverage (`api.firemark`) | **95.61%**, gate at 95% |
+| Type checking | `mypy --strict` over `api` and `scripts` — clean |
+| Linting | `ruff` — clean |
+| Frontend | `vitest`, `eslint`, `tsc --noEmit`, `next build` — clean |
+| Deployed-stack smoke | **14/14 PASS** |
+| Tagged checkpoints | 7, including `checkpoint-production-multimodal-stack` |
 
-```powershell
-python scripts\smoke_b2_custody.py --live `
-  --output-report .artifacts\b2-custody-report.json `
-  --force
-python -m pytest -m live_b2 --run-live-b2
-```
+Application construction performs **no network request**. Ordinary tests contact no provider, no
+database and no object store.
 
-The smoke uses a deterministic local PNG, not AI-generated or provider-generated content. It
-creates two persistent COMPLIANCE-retained vault versions and intentionally leaves them in place.
-The report contains safe keys, hashes, versions, and retention timestamps, but never credentials or
-the presigned URL. The default command without `--live` exits with code 2 and makes no network call.
-
-After a failed live smoke, use the separate read-only access diagnostic before authorizing another
-custody attempt. Its default command exits with informational code 2 and performs no network call:
-
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\diagnose_b2_access.py
-D:\firemark\.venv\Scripts\python.exe scripts\diagnose_b2_access.py --live
-```
-
-The live diagnostic is checkpoint-specific and contacts only the configured Backblaze endpoint. It
-uses `head_bucket`, `list_objects_v2` with `MaxKeys=1`, and the vault Object Lock configuration
-read. It never prints object names or credentials and never uploads, deletes, presigns, changes
-retention, writes a report, or repeats the custody smoke.
-
-After read-only access passes, inspect objects persisted by an interrupted custody smoke without
-repeating or mutating the smoke workflow. The default command exits with informational code 2 and
-makes no network call; the explicitly live command lists current FIREMARK keys, streams at most 10
-MiB per object for in-memory integrity checks, and reads vault retention without changing it:
-
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\inspect_b2_smoke_state.py
-D:\firemark\.venv\Scripts\python.exe scripts\inspect_b2_smoke_state.py --live
-```
-
-The inspector prints only allowlisted metadata and normalized safe errors. It never prints object
-bodies or complete manifests, persists downloaded bytes, uploads, deletes, copies, presigns, or
-changes bucket or Object Lock settings.
-
-When that inspector confirms one valid source pair, one valid manifest pair, and active
-`COMPLIANCE` retention, resume only the interrupted post-persistence checkpoint:
-
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\resume_b2_custody_checkpoint.py
-D:\firemark\.venv\Scripts\python.exe scripts\resume_b2_custody_checkpoint.py --live `
-  --output-report .artifacts\b2-custody-resume-report.json `
-  --force
-```
-
-The default recovery command exits with informational code 2 and performs no network call. The
-explicitly live recovery discovers VersionIds, counts relevant delete markers, verifies the
-private presigned source download, challenges the exact retained vault-manifest version, and only
-then deletes and verifies absence of the two exact unlocked assets versions. It never uploads,
-copies, changes retention, removes vault objects or delete markers, or persists the presigned URL.
-The safe report is written only after every mandatory stage passes.
-
-## Security
-
-Credentials, private signing keys, raw evidence, generated media, and local databases must remain
-outside version control. The example environment file contains variable names only. Never place
-production secrets in source files, logs, fixtures, or issue reports.
-
-Generate local provisioning files only when needed:
-
-```powershell
-python scripts\keygen.py
-```
-
-The private Base64 file is written under `.secrets/` and must never be copied into `evidence/` or
-committed. The script attempts restrictive file permissions, but it cannot guarantee Windows ACL
-policy. Apply an appropriate ACL, restrict account access, maintain a secure backup, and use managed
-key custody before production deployment. Never print the private value.
-
-Run the local trust smoke test independently with:
-
-```powershell
-python scripts\smoke_trust.py
-```
-
-Its PASS output demonstrates local cryptographic behavior with ephemeral keys and deterministic
-test bytes only. It is not production evidence.
-
-Run the zero-network Genblaze contract smoke test with temporary artifacts:
-
-```powershell
-python scripts\smoke_genblaze_roundtrip.py
-```
-
-Persist ignored local fixtures for manual CLI inspection:
-
-```powershell
-python scripts\smoke_genblaze_roundtrip.py `
-  --output-dir .artifacts\genblaze-roundtrip `
-  --force
-genblaze verify .artifacts\genblaze-roundtrip\full_embedded.png
-genblaze extract .artifacts\genblaze-roundtrip\full_embedded.png --format summary
-```
-
-Do not use `genblaze verify --fetch` against `full_embedded.png`: its embedded Manifest declares
-the pre-embedding source digest, while `--fetch` would hash the post-embedding container.
-
-The following command documents a known 0.3.8 limitation:
-
-```powershell
-genblaze extract .artifacts\genblaze-roundtrip\public_redacted.png
-```
-
-It reports `PointerSidecarError` because the public privacy payload is a pointer sidecar rather
-than a complete Manifest. Inspect the safe pointer JSON in
-`.artifacts\genblaze-roundtrip\public_embedded_payload.json`; it intentionally cannot reconstruct
-or verify a complete Manifest without resolving `manifest_uri`.
+---
 
 ## Honest limitations
 
-The historical B2 Custody smoke uses a local fixture and therefore does not prove provider
-generation by itself. The completed Generate & Seal checkpoint provides separate live evidence for
-the combined path, but neither that checkpoint nor the local web build claims that the complete
-application is deployed. The responsive public frontend, Birth Certificate experience, Verify Gate,
-and secure delivery proxy are implemented and tested locally. The deployment layer is ready, but
-the remote Railway and Vercel deployments, demo recording, and hackathon submission remain pending.
-B2 custody spans multiple objects and is not cross-object atomic; a registration failure can leave
-safe, billable partial storage that must be inspected before operational cleanup.
+- B2 custody spans multiple objects and is **not cross-object atomic**. A registration failure can
+  leave safe, billable partial storage that must be inspected before cleanup — the repository ships
+  read-only inspectors for exactly this.
+- The signature does not prove the named signer was *authorized*. Identity and operational controls
+  are future work.
+- `Manifest.verify()` validates the canonical manifest and declared digest coverage; it does not
+  re-hash the post-embedding container. FIREMARK binds the distributed container separately through
+  `sealed_sha256`.
+- Genblaze 0.3.8 stores redacted pointer payloads as a sidecar rather than inside PNG bytes;
+  FIREMARK therefore publishes its own public capsule and resolves pointers through B2 custody.
 
-## Production deployment readiness
+---
 
-The repository includes a non-root Python 3.12 Docker image and supported Railway configuration for
-the FastAPI backend, security headers for the Next.js frontend, zero-network CI gates, a safe
-environment inventory, and a read-only deployed-stack smoke that reuses the completed certificate.
-No production service has been deployed by this repository checkpoint.
+## License & author
 
-Follow [the production deployment runbook](docs/deployment.md) for the exact Railway-first then
-Vercel sequence, required variables, CORS update, rollback, and safe smoke procedure. The Vercel
-project root is `web/`; the Railway health check is `/healthz`. Review readiness and non-live smoke
-locally with:
+[MIT](LICENSE) · Built by **Juan Pablo Enriquez Ortiz** ([@jpablortiz96](https://github.com/jpablortiz96)).
 
-```powershell
-D:\firemark\.venv\Scripts\python.exe scripts\check_production_readiness.py
-D:\firemark\.venv\Scripts\python.exe scripts\smoke_deployed_stack.py
-```
+---
 
-The second command constructs no HTTP or external-service client and exits with informational code
-2. Live deployed verification must be run only after both final HTTPS domains are configured. Demo
-recording and hackathon submission remain pending.
+<div align="center">
+
+**AI media will scale faster than human trust.**
+<br>
+**FIREMARK makes the proof scale with it.**
+
+<br>
+
+[Launch FIREMARK](https://firemark-web.vercel.app) ·
+[Verify a certificate](https://firemark-web.vercel.app/verify) ·
+[Read the architecture](docs/architecture.md)
+
+</div>

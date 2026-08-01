@@ -1,0 +1,24 @@
+%% FIREMARK chain of custody across two separately credentialed B2 buckets
+flowchart TB
+  SRC["Provider source bytes"]
+  MAN["Genblaze canonical manifest"]
+  SEAL["Sealed distributable asset"]
+  ENV["Signed SealEnvelopeV1"]
+  subgraph ASSETS["B2 assets bucket — private, deletable"]
+    AS1["assets/{sha}.ext — source"]
+    AS2["manifests/{run}/{hash}.json"]
+    AS3["assets/{sealed_sha}.png|mp3"]
+  end
+  subgraph VAULT["B2 vault bucket — Object Lock COMPLIANCE"]
+    VS1["vault/sources/{sha}.ext"]
+    VS2["vault/manifests/{run}/{hash}.json"]
+  end
+  SRC --> AS1
+  SRC --> VS1
+  MAN --> AS2
+  MAN --> VS2
+  SEAL --> AS3
+  VS1 -. exact VersionId .-> ENV
+  VS2 -. exact VersionId .-> ENV
+  AS3 -. exact VersionId .-> ENV
+  ENV --> REG[("Supabase certificate record")]

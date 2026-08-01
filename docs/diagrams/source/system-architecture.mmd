@@ -1,0 +1,50 @@
+%% FIREMARK end-to-end system architecture
+flowchart LR
+  subgraph EXP["Experience layer"]
+    B["Browser"]
+    N["Next.js App Router<br/>Vercel"]
+  end
+  subgraph API["Control plane — FastAPI on Railway"]
+    G["POST /v1/generate-and-seal<br/>admin bearer + idempotency"]
+    C["GET /v1/certificates/{cert_id}"]
+    V["POST /v1/verify"]
+    D["POST /v1/delivery/{cert_id}<br/>Verify Gate"]
+  end
+  subgraph GEN["Generation layer"]
+    GM["Google Gemini<br/>Nano Banana 2"]
+    EL["ElevenLabs<br/>MP3"]
+    OA["OpenAI<br/>GPT Image"]
+  end
+  subgraph EV["Evidence and sealing"]
+    H["SHA-256 source digest"]
+    P["Genblaze canonical manifest"]
+    K["PNG public capsule"]
+    S["Ed25519 SealEnvelopeV1"]
+  end
+  subgraph CUS["Custody — Backblaze B2"]
+    A1["Assets bucket<br/>private"]
+    A2["Vault bucket<br/>Object Lock COMPLIANCE"]
+  end
+  SB[("Supabase<br/>RLS control plane")]
+  L["FIREMARK Lens<br/>zero-upload local verify"]
+
+  B --> N --> C
+  N --> V
+  N --> D
+  G --> GM
+  G --> EL
+  G --> OA
+  GM --> H
+  EL --> H
+  OA --> H
+  H --> P --> K --> S
+  S --> A1
+  S --> A2
+  P --> A2
+  S --> SB
+  C --> SB
+  V --> SB
+  D --> SB
+  D --> A1
+  B --> L
+  L --> V

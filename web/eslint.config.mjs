@@ -20,5 +20,13 @@ export default defineConfig([
       ...nextPlugin.configs["core-web-vitals"].rules,
     },
   },
+  {
+    // Node tooling that also evaluates callbacks inside a browser page context.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: { ...globals.node, ...globals.browser },
+      sourceType: "module",
+    },
+  },
   globalIgnores([".next/**", "coverage/**", "next-env.d.ts"]),
 ]);

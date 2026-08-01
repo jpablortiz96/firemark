@@ -1,0 +1,25 @@
+%% FIREMARK Generate and Seal — provider request to atomic registration
+sequenceDiagram
+  autonumber
+  participant OP as Operator
+  participant FM as FIREMARK API
+  participant PR as Provider (Gemini / ElevenLabs)
+  participant GB as Genblaze
+  participant B2 as Backblaze B2
+  participant SB as Supabase
+
+  OP->>FM: POST /v1/generate-and-seal (bearer + Idempotency-Key)
+  FM->>PR: exactly one generation request
+  PR-->>FM: source bytes
+  FM->>FM: source_sha256 over untouched bytes
+  FM->>GB: build canonical manifest
+  GB-->>FM: canonical_hash
+  FM->>FM: normalize to PNG carrier, embed public capsule
+  FM->>FM: sealed_sha256 over distributable bytes
+  FM->>B2: retain source + manifest under COMPLIANCE
+  B2-->>FM: exact VersionIds + retain-until
+  FM->>B2: upload sealed asset, read back and verify
+  FM->>FM: sign SealEnvelopeV1 with Ed25519
+  FM->>SB: atomic idempotent registration
+  SB-->>FM: certificate registered
+  FM-->>OP: cert_id, hashes, canonical_hash

@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 780" width="1440" height="780" role="img" aria-labelledby="saTitle saDesc" font-family="Inter, ui-sans-serif, system-ui, 'Segoe UI', Arial, sans-serif">
+  <title id="saTitle">FIREMARK system architecture</title>
+  <desc id="saDesc">Seven layers. A browser reaches a Next.js app on Vercel, which calls the FastAPI control plane on Railway. Generation providers produce source bytes that flow through hashing, Genblaze canonical provenance, PNG capsule embedding and Ed25519 signing, into Backblaze B2 custody with an immutable Object Lock vault, and are registered in Supabase. Public verification and FIREMARK Lens read the resulting certificate.</desc>
+  <defs>
+    <linearGradient id="sa-ember" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff5a1f"/><stop offset="1" stop-color="#ffad32"/></linearGradient>
+    <marker id="sa-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#6f7570"/></marker>
+    <marker id="sa-arrow-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#ff5a1f"/></marker>
+    <marker id="sa-arrow-cool" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8dffbc"/></marker>
+  </defs>
+  <rect width="1440" height="780" fill="#070808"/>
+  <rect width="1440" height="3" fill="url(#sa-ember)"/>
+
+  <text x="40" y="52" font-size="24" font-weight="800" fill="#f4f1e9" letter-spacing="-0.4">System architecture</text>
+  <text x="40" y="76" font-family="Consolas, monospace" font-size="14" fill="#777a75" letter-spacing="1.2">GENERATE → SEAL → CUSTODY → REGISTER → VERIFY → DELIVER</text>
+
+  <!-- legend -->
+  <g font-family="Consolas, monospace" font-size="13" letter-spacing="0.8">
+    <line x1="1010" y1="48" x2="1044" y2="48" stroke="#6f7570" stroke-width="2" marker-end="url(#sa-arrow)"/>
+    <text x="1052" y="53" fill="#777a75">request</text>
+    <line x1="1150" y1="48" x2="1184" y2="48" stroke="#ff5a1f" stroke-width="2" marker-end="url(#sa-arrow-hot)"/>
+    <text x="1192" y="53" fill="#777a75">evidence</text>
+    <line x1="1010" y1="74" x2="1044" y2="74" stroke="#8dffbc" stroke-width="2" marker-end="url(#sa-arrow-cool)"/>
+    <text x="1052" y="79" fill="#777a75">public verification</text>
+  </g>
+
+  <!-- EXPERIENCE -->
+  <g>
+    <rect x="40" y="112" width="300" height="152" rx="4" fill="#0d0f0f" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="56" y="138" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">EXPERIENCE LAYER</text>
+    <rect x="56" y="152" width="128" height="44" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="120" y="179" text-anchor="middle" font-size="15" fill="#f4f1e9">Browser</text>
+    <rect x="196" y="152" width="128" height="44" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="260" y="173" text-anchor="middle" font-size="15" fill="#f4f1e9">Next.js</text>
+    <text x="260" y="190" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">Vercel</text>
+    <rect x="56" y="208" width="268" height="40" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="190" y="226" text-anchor="middle" font-size="14" fill="#8dffbc">FIREMARK Lens</text>
+    <text x="190" y="242" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">zero-upload local verification</text>
+  </g>
+
+  <!-- CONTROL PLANE -->
+  <g>
+    <rect x="404" y="112" width="316" height="152" rx="4" fill="#0d0f0f" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="420" y="138" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">CONTROL PLANE — FASTAPI</text>
+    <g font-family="Consolas, monospace" font-size="13">
+      <rect x="420" y="150" width="284" height="26" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="432" y="168" fill="#ff5a1f">POST /v1/generate-and-seal</text>
+      <rect x="420" y="180" width="284" height="26" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="432" y="198" fill="#a8aaa4">GET  /v1/certificates/{cert_id}</text>
+      <rect x="420" y="210" width="284" height="26" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="432" y="228" fill="#a8aaa4">POST /v1/verify</text>
+      <rect x="420" y="240" width="284" height="18" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="432" y="253" fill="#8dffbc">POST /v1/delivery/{cert_id} — Verify Gate</text>
+    </g>
+  </g>
+
+  <!-- GENERATION -->
+  <g>
+    <rect x="784" y="112" width="288" height="152" rx="4" fill="#0d0f0f" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="800" y="138" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">GENERATION LAYER</text>
+    <rect x="800" y="152" width="256" height="32" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="812" y="173" font-size="14" fill="#f4f1e9">Google Gemini · Nano Banana 2</text>
+    <rect x="800" y="190" width="256" height="32" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="812" y="211" font-size="14" fill="#f4f1e9">ElevenLabs · MP3</text>
+    <rect x="800" y="228" width="256" height="30" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="812" y="248" font-size="14" fill="#f4f1e9">OpenAI · GPT Image</text>
+  </g>
+
+  <!-- EVIDENCE -->
+  <g>
+    <rect x="404" y="316" width="668" height="140" rx="4" fill="#0d0f0f" stroke="#ff5a1f" stroke-opacity="0.35" stroke-width="1.5"/>
+    <text x="420" y="342" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ff5a1f" letter-spacing="1.8">EVIDENCE AND SEALING LAYER</text>
+    <g>
+      <rect x="420" y="356" width="150" height="80" rx="3" fill="#111414" stroke="#2b2e2c"/>
+      <text x="495" y="384" text-anchor="middle" font-size="14" fill="#f4f1e9">SHA-256</text>
+      <text x="495" y="404" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">source digest</text>
+      <text x="495" y="422" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">untouched bytes</text>
+
+      <rect x="586" y="356" width="150" height="80" rx="3" fill="#111414" stroke="#2b2e2c"/>
+      <text x="661" y="384" text-anchor="middle" font-size="14" fill="#ffad32">Genblaze</text>
+      <text x="661" y="404" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">canonical manifest</text>
+      <text x="661" y="422" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">canonical_hash</text>
+
+      <rect x="752" y="356" width="150" height="80" rx="3" fill="#111414" stroke="#2b2e2c"/>
+      <text x="827" y="384" text-anchor="middle" font-size="14" fill="#f4f1e9">PNG capsule</text>
+      <text x="827" y="404" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">deterministic tEXt</text>
+      <text x="827" y="422" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">sealed digest</text>
+
+      <rect x="918" y="356" width="138" height="80" rx="3" fill="#111414" stroke="#2b2e2c"/>
+      <text x="987" y="384" text-anchor="middle" font-size="14" fill="#f4f1e9">Ed25519</text>
+      <text x="987" y="404" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">SealEnvelopeV1</text>
+      <text x="987" y="422" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">detached signature</text>
+    </g>
+  </g>
+
+  <!-- CUSTODY -->
+  <g>
+    <rect x="404" y="508" width="420" height="180" rx="4" fill="#0d0f0f" stroke="#ffad32" stroke-opacity="0.35" stroke-width="1.5"/>
+    <text x="420" y="534" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">CUSTODY LAYER — BACKBLAZE B2</text>
+    <rect x="420" y="548" width="188" height="124" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="514" y="574" text-anchor="middle" font-size="14" fill="#f4f1e9">Assets bucket</text>
+    <g font-family="Consolas, monospace" font-size="12" fill="#777a75">
+      <text x="436" y="598">private, deletable</text>
+      <text x="436" y="620">source bytes</text>
+      <text x="436" y="642">full manifest</text>
+      <text x="436" y="664">sealed distributable</text>
+    </g>
+    <rect x="620" y="548" width="188" height="124" rx="3" fill="#111414" stroke="#ffad32" stroke-opacity="0.45"/>
+    <text x="714" y="574" text-anchor="middle" font-size="14" fill="#ffad32">Vault bucket</text>
+    <g font-family="Consolas, monospace" font-size="12" fill="#777a75">
+      <text x="636" y="598" fill="#8dffbc">Object Lock COMPLIANCE</text>
+      <text x="636" y="620">retained source</text>
+      <text x="636" y="642">retained manifest</text>
+      <text x="636" y="664">exact VersionIds</text>
+    </g>
+  </g>
+
+  <!-- SUPABASE -->
+  <g>
+    <rect x="872" y="508" width="200" height="180" rx="4" fill="#0d0f0f" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="888" y="534" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">CONTROL PLANE DB</text>
+    <rect x="888" y="548" width="168" height="124" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="972" y="574" text-anchor="middle" font-size="14" fill="#f4f1e9">Supabase</text>
+    <g font-family="Consolas, monospace" font-size="12" fill="#777a75">
+      <text x="904" y="598">six RLS tables</text>
+      <text x="904" y="620">atomic registration</text>
+      <text x="904" y="642">public projection RPC</text>
+      <text x="904" y="664">verify + delivery events</text>
+    </g>
+  </g>
+
+  <!-- PUBLIC VERIFICATION -->
+  <g>
+    <rect x="1116" y="316" width="284" height="372" rx="4" fill="#0d0f0f" stroke="#8dffbc" stroke-opacity="0.30" stroke-width="1.5"/>
+    <text x="1132" y="342" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#8dffbc" letter-spacing="1.8">PUBLIC VERIFICATION</text>
+    <rect x="1132" y="356" width="252" height="86" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="1258" y="382" text-anchor="middle" font-size="14" fill="#f4f1e9">Birth Certificate</text>
+    <text x="1258" y="402" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">redacted public projection</text>
+    <text x="1258" y="424" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">both hashes + signature</text>
+
+    <rect x="1132" y="454" width="252" height="86" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="1258" y="480" text-anchor="middle" font-size="14" fill="#f4f1e9">Verify Gate</text>
+    <text x="1258" y="500" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">signature · envelope · custody</text>
+    <text x="1258" y="522" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">exact sealed_sha256 required</text>
+
+    <rect x="1132" y="552" width="252" height="120" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="1258" y="578" text-anchor="middle" font-size="14" fill="#8dffbc">Authorized delivery</text>
+    <text x="1258" y="600" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">blocked until verification</text>
+    <text x="1258" y="622" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">exact VersionId confirmed</text>
+    <text x="1258" y="644" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">short-lived private URL</text>
+    <text x="1258" y="664" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">never logged or persisted</text>
+  </g>
+
+  <!-- flows -->
+  <g stroke-width="2" fill="none">
+    <path d="M340 174 H404" stroke="#6f7570" marker-end="url(#sa-arrow)"/>
+    <path d="M720 174 H784" stroke="#6f7570" marker-end="url(#sa-arrow)"/>
+    <path d="M928 264 V300 H740 V316" stroke="#ff5a1f" marker-end="url(#sa-arrow-hot)"/>
+    <path d="M562 264 V300 H520 V316" stroke="#6f7570" marker-end="url(#sa-arrow)"/>
+    <path d="M614 456 V508" stroke="#ff5a1f" marker-end="url(#sa-arrow-hot)"/>
+    <path d="M987 456 V508" stroke="#ff5a1f" marker-end="url(#sa-arrow-hot)"/>
+    <path d="M1072 388 H1116" stroke="#8dffbc" marker-end="url(#sa-arrow-cool)"/>
+    <path d="M1072 598 H1116" stroke="#8dffbc" marker-end="url(#sa-arrow-cool)"/>
+    <path d="M824 598 H872" stroke="#ffad32" marker-end="url(#sa-arrow-hot)"/>
+    <path d="M190 264 V712 H1258 V688" stroke="#8dffbc" stroke-dasharray="6 5" marker-end="url(#sa-arrow-cool)"/>
+  </g>
+  <text x="640" y="736" font-family="Consolas, monospace" font-size="13" fill="#777a75" letter-spacing="1">FIREMARK Lens verifies locally, then asks the public Verify API for the final decision</text>
+</svg>

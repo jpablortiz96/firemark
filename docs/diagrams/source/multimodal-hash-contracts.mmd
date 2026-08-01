@@ -1,0 +1,17 @@
+%% FIREMARK media-aware hash contracts
+flowchart LR
+  subgraph IMG["Image — Google Gemini / Nano Banana 2"]
+    I1["Provider JPEG source"] --> I2["source_sha256"]
+    I2 --> I3["Genblaze canonical manifest"]
+    I3 --> I4["Deterministic PNG normalization"]
+    I4 --> I5["Embed FiremarkPublicCapsuleV1"]
+    I5 --> I6["sealed_sha256 — differs from source"]
+    I6 --> I7["Verify from the embedded capsule"]
+  end
+  subgraph AUD["Audio — ElevenLabs"]
+    A1["Provider MP3 source"] --> A2["source_sha256"]
+    A2 --> A3["Genblaze canonical manifest"]
+    A3 --> A4["Byte-preserving seal — no rewrite"]
+    A4 --> A5["sealed_sha256 — equals source"]
+    A5 --> A6["Verify with cert_id + local SHA-256"]
+  end

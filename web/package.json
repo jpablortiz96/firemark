@@ -12,7 +12,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "capture:readme": "node scripts/capture-readme-screenshots.mjs"
   },
   "dependencies": {
     "fflate": "0.8.3",
@@ -35,6 +36,7 @@
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.8.0",
     "jsdom": "29.1.1",
+    "playwright": "1.58.0",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "typescript-eslint": "8.65.0",

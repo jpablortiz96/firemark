@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 620" width="1440" height="620" role="img" aria-labelledby="tbTitle tbDesc" font-family="Inter, ui-sans-serif, system-ui, 'Segoe UI', Arial, sans-serif">
+  <title id="tbTitle">FIREMARK trust boundaries</title>
+  <desc id="tbDesc">Four zones. Public evidence anyone may read, private evidence reachable only by the service role, secrets that never leave the server, and immutable custody that cannot be rewritten. Secrets sign the public zone, private evidence contributes only a canonical hash, and immutable custody is referenced from the public zone by exact VersionId.</desc>
+  <defs>
+    <linearGradient id="tb-ember" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff5a1f"/><stop offset="1" stop-color="#ffad32"/></linearGradient>
+    <marker id="tb-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8dffbc"/></marker>
+  </defs>
+  <rect width="1440" height="620" fill="#070808"/>
+  <rect width="1440" height="3" fill="url(#tb-ember)"/>
+
+  <text x="40" y="52" font-size="24" font-weight="800" fill="#f4f1e9" letter-spacing="-0.4">Trust boundaries</text>
+  <text x="40" y="76" font-family="Consolas, monospace" font-size="14" fill="#777a75" letter-spacing="1">What crosses each boundary is a design decision, not an accident.</text>
+
+  <!-- PUBLIC -->
+  <g>
+    <rect x="40" y="108" width="416" height="292" rx="4" fill="#0d0f0f" stroke="#8dffbc" stroke-opacity="0.40" stroke-width="1.5"/>
+    <rect x="40" y="108" width="416" height="34" rx="4" fill="#8dffbc" fill-opacity="0.10"/>
+    <text x="60" y="131" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#8dffbc" letter-spacing="1.8">PUBLIC — ANYONE MAY READ</text>
+    <g font-family="Consolas, monospace" font-size="13" fill="#c4c5bf">
+      <text x="60" y="172">cert_id · run_id · asset_id</text>
+      <text x="60" y="198">provider · model · provider_model_name</text>
+      <text x="60" y="224">media_type · mime_type · byte_size</text>
+      <text x="60" y="250">source_sha256 · sealed_sha256</text>
+      <text x="60" y="276">canonical_hash</text>
+      <text x="60" y="302">signer_key_id · Ed25519 public key</text>
+      <text x="60" y="328">detached signature · certificate status</text>
+      <text x="60" y="354" fill="#8dffbc">FiremarkPublicCapsuleV1 (PNG only)</text>
+      <text x="60" y="382" fill="#777a75" font-size="12">enough to verify — never enough to reproduce</text>
+    </g>
+  </g>
+
+  <!-- PRIVATE -->
+  <g>
+    <rect x="512" y="108" width="416" height="292" rx="4" fill="#0d0f0f" stroke="#ffad32" stroke-opacity="0.40" stroke-width="1.5"/>
+    <rect x="512" y="108" width="416" height="34" rx="4" fill="#ffad32" fill-opacity="0.10"/>
+    <text x="532" y="131" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">PRIVATE — SERVICE ROLE ONLY</text>
+    <g font-family="Consolas, monospace" font-size="13" fill="#c4c5bf">
+      <text x="532" y="172">prompt · TTS text</text>
+      <text x="532" y="198">provider parameters · seed</text>
+      <text x="532" y="224">complete Genblaze manifest</text>
+      <text x="532" y="250">storage buckets and object keys</text>
+      <text x="532" y="276">B2 VersionIds</text>
+      <text x="532" y="302">custody receipt internals</text>
+      <text x="532" y="328">request fingerprint (idempotency)</text>
+      <text x="532" y="354" fill="#777a75">anonymous and authenticated roles get</text>
+      <text x="532" y="376" fill="#777a75">no direct table access — RLS enforced</text>
+    </g>
+  </g>
+
+  <!-- SECRET -->
+  <g>
+    <rect x="984" y="108" width="416" height="292" rx="4" fill="#0d0f0f" stroke="#ff5a1f" stroke-opacity="0.45" stroke-width="1.5"/>
+    <rect x="984" y="108" width="416" height="34" rx="4" fill="#ff5a1f" fill-opacity="0.10"/>
+    <text x="1004" y="131" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ff5a1f" letter-spacing="1.8">SECRET — NEVER LEAVES THE SERVER</text>
+    <g font-family="Consolas, monospace" font-size="13" fill="#c4c5bf">
+      <text x="1004" y="172">Ed25519 signing private key</text>
+      <text x="1004" y="198">provider API keys</text>
+      <text x="1004" y="224">Supabase service-role key</text>
+      <text x="1004" y="250">B2 application keys (assets · vault)</text>
+      <text x="1004" y="276">admin and delivery bearer credentials</text>
+      <text x="1004" y="302" fill="#ff5a1f">presigned and transient delivery URLs</text>
+      <text x="1004" y="328" fill="#777a75">exist only in the successful response</text>
+      <text x="1004" y="354" fill="#777a75">never logged, never persisted, never in an</text>
+      <text x="1004" y="376" fill="#777a75">exception, a report or a checkpoint</text>
+    </g>
+  </g>
+
+  <!-- IMMUTABLE -->
+  <g>
+    <rect x="40" y="428" width="1360" height="152" rx="4" fill="#0d0f0f" stroke="#2b2e2c" stroke-width="1.5"/>
+    <rect x="40" y="428" width="4" height="152" fill="#ffad32"/>
+    <text x="68" y="460" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">IMMUTABLE — CANNOT BE REWRITTEN</text>
+    <g font-family="Consolas, monospace" font-size="13" fill="#c4c5bf">
+      <text x="68" y="492">Backblaze B2 vault objects under Object Lock COMPLIANCE retention</text>
+      <text x="68" y="518">the retained provider source · the retained canonical manifest · both at exact VersionIds</text>
+      <text x="68" y="548" fill="#8dffbc">FIREMARK cannot shorten or bypass this retention. Neither can an operator who holds the FIREMARK keys.</text>
+    </g>
+  </g>
+
+  <!-- crossings -->
+  <g stroke-width="2" fill="none" stroke-dasharray="6 4">
+    <path d="M984 240 H932" stroke="#8dffbc" marker-end="url(#tb-arrow)"/>
+    <path d="M512 240 H460" stroke="#8dffbc" marker-end="url(#tb-arrow)"/>
+  </g>
+  <g font-family="Consolas, monospace" font-size="12" fill="#777a75">
+    <text x="716" y="424" text-anchor="middle" fill="#8dffbc">↑ only canonical_hash crosses</text>
+    <text x="1192" y="424" text-anchor="middle" fill="#8dffbc">↑ only a signature crosses</text>
+  </g>
+</svg>

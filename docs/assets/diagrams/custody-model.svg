@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 660" width="1440" height="660" role="img" aria-labelledby="cmTitle cmDesc" font-family="Inter, ui-sans-serif, system-ui, 'Segoe UI', Arial, sans-serif">
+  <title id="cmTitle">FIREMARK chain of custody on Backblaze B2</title>
+  <desc id="cmDesc">Provider source bytes and the Genblaze canonical manifest are written to two separately credentialed private Backblaze B2 buckets. The assets bucket holds operational copies and the sealed distributable asset. The vault bucket holds the source and manifest under Object Lock COMPLIANCE retention. The exact VersionId of every object is bound into the signed Ed25519 envelope and registered in Supabase, so a certificate references bytes that cannot be silently replaced.</desc>
+  <defs>
+    <linearGradient id="cm-ember" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff5a1f"/><stop offset="1" stop-color="#ffad32"/></linearGradient>
+    <marker id="cm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#ff5a1f"/></marker>
+    <marker id="cm-arrow-cool" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8dffbc"/></marker>
+  </defs>
+  <rect width="1440" height="660" fill="#070808"/>
+  <rect width="1440" height="3" fill="url(#cm-ember)"/>
+
+  <text x="40" y="52" font-size="24" font-weight="800" fill="#f4f1e9" letter-spacing="-0.4">Chain of custody — Backblaze B2</text>
+  <text x="40" y="76" font-family="Consolas, monospace" font-size="14" fill="#777a75" letter-spacing="1">Two separately credentialed private buckets. One can be cleaned up. One cannot be rewritten.</text>
+
+  <!-- inputs -->
+  <g font-size="14">
+    <rect x="40" y="128" width="228" height="72" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="154" y="158" text-anchor="middle" fill="#f4f1e9">Provider source bytes</text>
+    <text x="154" y="180" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">JPEG · MP3 · PNG</text>
+
+    <rect x="40" y="222" width="228" height="72" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="154" y="252" text-anchor="middle" fill="#ffad32">Genblaze manifest</text>
+    <text x="154" y="274" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">complete, private</text>
+
+    <rect x="40" y="316" width="228" height="72" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="154" y="346" text-anchor="middle" fill="#f4f1e9">Sealed distributable</text>
+    <text x="154" y="368" text-anchor="middle" font-family="Consolas, monospace" font-size="12" fill="#777a75">capsule-bearing PNG · MP3</text>
+  </g>
+
+  <!-- assets bucket -->
+  <g>
+    <rect x="352" y="108" width="392" height="300" rx="4" fill="#0d0f0f" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="376" y="140" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#a8aaa4" letter-spacing="1.8">ASSETS BUCKET — PRIVATE</text>
+    <text x="376" y="162" font-family="Consolas, monospace" font-size="12" fill="#777a75">operational copies · scoped key · deletable</text>
+    <g font-family="Consolas, monospace" font-size="13">
+      <rect x="376" y="180" width="344" height="42" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="392" y="200" fill="#f4f1e9">assets/{sha[0:2]}/{sha[2:4]}/{sha}.ext</text>
+      <text x="392" y="216" fill="#777a75" font-size="12">source copy for controlled reads</text>
+
+      <rect x="376" y="232" width="344" height="42" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="392" y="252" fill="#f4f1e9">manifests/{run_id}/{canonical_hash}.json</text>
+      <text x="392" y="268" fill="#777a75" font-size="12">full private provenance</text>
+
+      <rect x="376" y="284" width="344" height="42" rx="2" fill="#111414" stroke="#ff5a1f" stroke-opacity="0.5"/>
+      <text x="392" y="304" fill="#ff5a1f">assets/{sealed_sha}.png | .mp3</text>
+      <text x="392" y="320" fill="#777a75" font-size="12">the only object delivery ever serves</text>
+
+      <rect x="376" y="340" width="344" height="46" rx="2" fill="#0d0f0f" stroke="#2b2e2c"/>
+      <text x="392" y="360" fill="#8dffbc" font-size="12">read back and hash-verified after every write</text>
+      <text x="392" y="378" fill="#777a75" font-size="12">exact VersionId required on head, get and delete</text>
+    </g>
+  </g>
+
+  <!-- vault bucket -->
+  <g>
+    <rect x="792" y="108" width="392" height="300" rx="4" fill="#0d0f0f" stroke="#ffad32" stroke-opacity="0.45" stroke-width="1.5"/>
+    <text x="816" y="140" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">VAULT BUCKET — OBJECT LOCK</text>
+    <text x="816" y="162" font-family="Consolas, monospace" font-size="12" fill="#8dffbc">COMPLIANCE retention · separate key · never cleaned up</text>
+    <g font-family="Consolas, monospace" font-size="13">
+      <rect x="816" y="180" width="344" height="42" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="832" y="200" fill="#f4f1e9">vault/sources/{sha[0:2]}/{sha[2:4]}/{sha}.ext</text>
+      <text x="832" y="216" fill="#777a75" font-size="12">the bytes the provider actually produced</text>
+
+      <rect x="816" y="232" width="344" height="42" rx="2" fill="#111414" stroke="#2b2e2c"/>
+      <text x="832" y="252" fill="#f4f1e9">vault/manifests/{run_id}/{canonical_hash}.json</text>
+      <text x="832" y="268" fill="#777a75" font-size="12">the provenance the signature commits to</text>
+
+      <g transform="translate(988 316)">
+        <rect x="-26" y="-10" width="52" height="40" rx="3" fill="#0d0f0f" stroke="#ffad32" stroke-width="2"/>
+        <path d="M-14 -10v-13a14 14 0 0 1 28 0v13" fill="none" stroke="#ffad32" stroke-width="2"/>
+        <circle cy="10" r="4" fill="#ffad32"/>
+      </g>
+      <text x="988" y="374" text-anchor="middle" fill="#8dffbc" font-size="12">retention proved by reading it back from B2</text>
+    </g>
+  </g>
+
+  <!-- envelope + registration -->
+  <g>
+    <rect x="1232" y="108" width="168" height="300" rx="4" fill="#0d0f0f" stroke="#8dffbc" stroke-opacity="0.35" stroke-width="1.5"/>
+    <text x="1316" y="140" text-anchor="middle" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#8dffbc" letter-spacing="1.4">BINDING</text>
+    <rect x="1252" y="160" width="128" height="104" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="1316" y="186" text-anchor="middle" font-size="14" fill="#f4f1e9">SealEnvelopeV1</text>
+    <g font-family="Consolas, monospace" font-size="11.5" fill="#777a75">
+      <text x="1316" y="208" text-anchor="middle">source_sha256</text>
+      <text x="1316" y="226" text-anchor="middle">sealed_sha256</text>
+      <text x="1316" y="244" text-anchor="middle">canonical_hash</text>
+      <text x="1316" y="258" text-anchor="middle" fill="#ffad32">exact VersionIds</text>
+    </g>
+    <rect x="1252" y="278" width="128" height="52" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="1316" y="300" text-anchor="middle" font-size="13" fill="#ffad32">Ed25519</text>
+    <text x="1316" y="318" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#777a75">detached signature</text>
+    <rect x="1252" y="344" width="128" height="46" rx="3" fill="#111414" stroke="#2b2e2c"/>
+    <text x="1316" y="366" text-anchor="middle" font-size="13" fill="#f4f1e9">Supabase</text>
+    <text x="1316" y="382" text-anchor="middle" font-family="Consolas, monospace" font-size="11.5" fill="#777a75">atomic registration</text>
+  </g>
+
+  <!-- flows -->
+  <g stroke-width="2" fill="none">
+    <path d="M268 164 H348" stroke="#ff5a1f" marker-end="url(#cm-arrow)"/>
+    <path d="M268 258 H348" stroke="#ff5a1f" marker-end="url(#cm-arrow)"/>
+    <path d="M268 352 H348" stroke="#ff5a1f" marker-end="url(#cm-arrow)"/>
+    <path d="M268 152 C 300 100, 760 84, 812 176" stroke="#ffad32" marker-end="url(#cm-arrow)"/>
+    <path d="M268 246 C 320 440, 760 440, 812 240" stroke="#ffad32" marker-end="url(#cm-arrow)"/>
+    <path d="M744 300 H788" stroke="#2b2e2c"/>
+    <path d="M1184 220 H1228" stroke="#8dffbc" stroke-dasharray="6 4" marker-end="url(#cm-arrow-cool)"/>
+    <path d="M744 304 C 1160 470, 1200 300, 1248 246" stroke="#8dffbc" stroke-dasharray="6 4" marker-end="url(#cm-arrow-cool)"/>
+  </g>
+
+  <!-- why it matters -->
+  <g>
+    <rect x="40" y="448" width="1360" height="164" rx="4" fill="#0d0f0f" stroke="#2b2e2c" stroke-width="1.5"/>
+    <text x="64" y="480" font-family="Consolas, monospace" font-size="13" font-weight="700" fill="#ffad32" letter-spacing="1.8">WHY ORDINARY OBJECT STORAGE IS NOT ENOUGH</text>
+    <g font-size="14" fill="#c4c5bf">
+      <text x="64" y="512">A bucket that can be overwritten cannot anchor evidence. FIREMARK claims custody only after it reads</text>
+      <text x="64" y="536">retention back from B2, confirms COMPLIANCE mode and a sufficient retain-until date, and re-downloads</text>
+      <text x="64" y="560">the exact bytes by VersionId. Retention cannot be shortened or bypassed by FIREMARK itself.</text>
+      <text x="64" y="590" fill="#8dffbc" font-family="Consolas, monospace" font-size="13">If the certificate and the retained object ever disagree, verification fails closed — it does not degrade to trust.</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,30 @@
+%% FIREMARK production deployment topology
+flowchart LR
+  U["Browser"]
+  subgraph VC["Vercel"]
+    NX["Next.js App Router<br/>RSC + route handlers"]
+  end
+  subgraph RW["Railway"]
+    FA["FastAPI<br/>non-root Python 3.12 image"]
+  end
+  subgraph SUP["Supabase"]
+    PG[("PostgreSQL + RLS")]
+  end
+  subgraph BB["Backblaze B2"]
+    AB["assets bucket"]
+    VB["vault bucket<br/>Object Lock"]
+  end
+  subgraph PV["AI providers"]
+    GM["Google Gemini"]
+    EL["ElevenLabs"]
+    OA["OpenAI"]
+  end
+  U -->|HTTPS| NX
+  NX -->|public API| FA
+  NX -.->|server-only delivery bearer| FA
+  FA --> PG
+  FA --> AB
+  FA --> VB
+  FA --> GM
+  FA --> EL
+  FA --> OA

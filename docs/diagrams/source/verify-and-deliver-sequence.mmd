@@ -1,0 +1,22 @@
+%% FIREMARK Verify Gate — certificate lookup to delivered-byte verification
+sequenceDiagram
+  autonumber
+  participant U as Holder
+  participant W as Next.js route handler
+  participant FM as FIREMARK API
+  participant SB as Supabase
+  participant B2 as Backblaze B2
+
+  U->>W: present cert_id + locally computed sealed_sha256
+  W->>FM: POST /v1/verify
+  FM->>SB: read certificate + signed envelope
+  FM->>FM: verify Ed25519 signature and envelope
+  FM->>FM: compare presented hash to sealed_sha256
+  FM->>SB: append verification event
+  FM-->>W: verified / blocked + safe reason
+  W->>FM: POST /v1/delivery/{cert_id} (server-only bearer)
+  FM->>B2: confirm exact recorded VersionId
+  FM->>SB: append delivery event (no URL stored)
+  FM-->>W: short-lived private download
+  W-->>U: delivered bytes
+  U->>U: re-hash delivered bytes, compare to certificate
