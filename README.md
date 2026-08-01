@@ -683,6 +683,32 @@ D:\firemark\.venv\Scripts\python.exe scripts\smoke_multimodal_generate_and_seal.
   --output-report .artifacts\multimodal-generate-and-seal-report.json --force
 ```
 
+#### Finalization and `--resume-existing`
+
+After both operations complete, finalization runs four stages of its own —
+`multimodal_evidence_validation`, `report_serialization`, `report_secret_scan` and
+`checkpoint_finalization`. They exist so a terminal defect is reported against the step that
+actually failed. A failure there is never attributed to a provider configuration stage.
+
+The report's secret scan validates stage rows structurally against the declared stage tuples
+instead of substring-scanning them. Stage labels such as `gemini_private_manifest` are FIREMARK's
+own vocabulary describing a step; they never carry the manifest, and matching them as if they were
+provider data previously failed a completely successful run.
+
+When both checkpoints are already `complete`, finalize the run without touching any provider:
+
+```powershell
+D:\firemark\.venv\Scripts\python.exe scripts\smoke_multimodal_generate_and_seal.py `
+  --resume-existing --output-report .artifacts\multimodal-generate-and-seal-report.json --force
+```
+
+This needs no `--live`: it constructs no Gemini, ElevenLabs, B2 or Supabase client, reads only the
+persisted safe checkpoints, revalidates the complete evidence, writes the report and exits 0. It
+prints `NEW_GEMINI_CALLS=0` and `NEW_ELEVENLABS_CALLS=0`, while `recorded_gemini_calls` and
+`recorded_elevenlabs_calls` preserve the single provider call each original operation made. Adding
+`--live` resumes stages that are still incomplete through the existing recovery path, which reuses
+persisted bytes and never issues a second provider request.
+
 The Google Gemini checkpoint verifies its embedded public PNG capsule. The ElevenLabs checkpoint confirms
 the byte-preserving MP3 strategy and the detached `cert_id + sha256` verification contract. Both
 paths validate exact B2 VersionIds, COMPLIANCE retention, Supabase registration, public projection,

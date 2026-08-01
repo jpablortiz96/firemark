@@ -163,6 +163,17 @@ ELEVENLABS_STAGES = (
     "elevenlabs_local_hash_contract",
 )
 
+#: Stages that run after both media operations finish. They are reported with
+#: their own accurate names so a finalization defect is never mislabelled as a
+#: provider configuration failure.
+FINALIZATION_STAGES = (
+    "multimodal_evidence_validation",
+    "report_serialization",
+    "report_secret_scan",
+    "checkpoint_finalization",
+)
+ALL_STAGES = frozenset(GEMINI_STAGES) | frozenset(ELEVENLABS_STAGES)
+
 _PROVIDER_CATEGORIES = {
     "authentication": "AUTHENTICATION_FAILURE",
     "permission_denied": "PERMISSION_DENIED",
@@ -1217,18 +1228,60 @@ def _operation_report(checkpoint: MultimodalCheckpoint) -> dict[str, object]:
     }
 
 
+def _validated_stage_rows(rows: object) -> tuple[str, ...]:
+    """Validate stage rows against the declared stage names.
+
+    Stage labels are FIREMARK's own vocabulary, not provider data. Several of
+    them legitimately contain words the secret scanner treats as markers -- for
+    example ``gemini_private_manifest`` names the step that builds the private
+    manifest, it never carries the manifest. Validating the rows against the
+    declared stage tuples is strictly stronger than a substring scan, so the
+    rows are checked here and excluded from the marker scan below.
+    """
+    if not isinstance(rows, list):
+        raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
+    names: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != {"stage", "status"}:
+            raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
+        stage = row["stage"]
+        if stage not in ALL_STAGES or row["status"] != "PASS":
+            raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
+        names.append(str(stage))
+    return tuple(names)
+
+
+def _scannable_report(report: Mapping[str, object]) -> dict[str, object]:
+    """Return a scan copy with validated stage rows reduced to a count."""
+    scannable: dict[str, object] = {}
+    for key, value in report.items():
+        if isinstance(value, Mapping) and "stages" in value:
+            operation = dict(value)
+            operation["stages"] = len(_validated_stage_rows(operation.pop("stages")))
+            scannable[key] = operation
+        else:
+            scannable[key] = value
+    return scannable
+
+
 def _safe_report_bytes(report: Mapping[str, object]) -> bytes:
     payload = json.dumps(report, ensure_ascii=True, indent=2, sort_keys=True).encode("utf-8")
-    lowered = payload.decode("utf-8").lower()
-    if any(marker in lowered for marker in _FORBIDDEN_REPORT_MARKERS):
+    scanned = json.dumps(
+        _scannable_report(report), ensure_ascii=True, sort_keys=True, default=str
+    ).lower()
+    if any(marker in scanned for marker in _FORBIDDEN_REPORT_MARKERS):
         raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
     return payload
 
 
-def _write_safe_report(path: Path, report: Mapping[str, object], *, force: bool) -> None:
+def _write_report_bytes(path: Path, payload: bytes, *, force: bool) -> None:
     if path.exists() and not force:
-        raise LiveCheckpointError("SAFE_UNEXPECTED_FAILURE")
-    _atomic_write(path, _safe_report_bytes(report))
+        raise LiveCheckpointError("REPORT_EXISTS")
+    _atomic_write(path, payload)
+
+
+def _write_safe_report(path: Path, report: Mapping[str, object], *, force: bool) -> None:
+    _write_report_bytes(path, _safe_report_bytes(report), force=force)
 
 
 def _initialize_checkpoint(
@@ -1545,6 +1598,105 @@ def _run_sequential_operations(
     return gemini, elevenlabs
 
 
+def _validate_multimodal_evidence(
+    gemini: Mapping[str, object], elevenlabs: Mapping[str, object]
+) -> None:
+    """Prove both operations carry complete, distinct production evidence."""
+    for operation, provider, media_type in (
+        (gemini, GOOGLE_GEMINI_PROVIDER, "image"),
+        (elevenlabs, "elevenlabs", "audio"),
+    ):
+        if operation.get("provider") != provider or operation.get("media_type") != media_type:
+            raise LiveCheckpointError("VERIFICATION_FAILURE")
+        if operation.get("ai_generated") is not True:
+            raise LiveCheckpointError("VERIFICATION_FAILURE")
+        for field in (
+            "run_id",
+            "asset_id",
+            "cert_id",
+            "source_sha256",
+            "sealed_sha256",
+            "canonical_hash",
+            "signer_key_id",
+            "sealed_asset_version_id",
+            "vault_source_version_id",
+            "vault_manifest_version_id",
+        ):
+            if not operation.get(field):
+                raise LiveCheckpointError("VERIFICATION_FAILURE")
+        declared = GEMINI_STAGES if media_type == "image" else ELEVENLABS_STAGES
+        if _validated_stage_rows(operation.get("stages")) != declared:
+            # Every declared stage must have run, exactly once, in order.
+            raise LiveCheckpointError("VERIFICATION_FAILURE")
+    if gemini.get("source_sha256") == gemini.get("sealed_sha256"):
+        raise LiveCheckpointError("VERIFICATION_FAILURE")
+    if elevenlabs.get("source_sha256") != elevenlabs.get("sealed_sha256"):
+        raise LiveCheckpointError("VERIFICATION_FAILURE")
+    if gemini.get("cert_id") == elevenlabs.get("cert_id"):
+        raise LiveCheckpointError("VERIFICATION_FAILURE")
+
+
+def _build_report(
+    gemini: Mapping[str, object],
+    elevenlabs: Mapping[str, object],
+    *,
+    new_gemini_calls: int,
+    new_elevenlabs_calls: int,
+) -> dict[str, object]:
+    """Build the safe report. ``new_*_calls`` counts calls made by this process."""
+    return {
+        "schema_version": "firemark.multimodal-generate-and-seal-report.v1",
+        "package_versions": {
+            name: importlib.metadata.version(name)
+            for name in ("firemark", "genblaze-core", "boto3", "supabase")
+        },
+        "gemini": dict(gemini),
+        "elevenlabs": dict(elevenlabs),
+        "production_gemini_evidence": True,
+        "production_elevenlabs_evidence": True,
+        "production_multimodal_evidence": True,
+        "production_b2_custody_evidence": True,
+        "production_supabase_evidence": True,
+        "new_gemini_calls": new_gemini_calls,
+        "new_elevenlabs_calls": new_elevenlabs_calls,
+        "recorded_gemini_calls": gemini.get("new_provider_calls"),
+        "recorded_elevenlabs_calls": elevenlabs.get("new_provider_calls"),
+    }
+
+
+def finalize(
+    gemini: Mapping[str, object],
+    elevenlabs: Mapping[str, object],
+    report_path: Path,
+    *,
+    force: bool,
+    new_gemini_calls: int,
+    new_elevenlabs_calls: int,
+    stage_callback: Callable[[str], None],
+) -> dict[str, object]:
+    """Validate evidence, serialize, scan and persist the report.
+
+    Every step reports its own stage, so a finalization defect can never be
+    attributed to a provider configuration stage.
+    """
+    stage_callback("multimodal_evidence_validation")
+    _validate_multimodal_evidence(gemini, elevenlabs)
+    if gemini.get("new_provider_calls") != 1 or elevenlabs.get("new_provider_calls") != 1:
+        raise LiveCheckpointError("VERIFICATION_FAILURE")
+    stage_callback("report_serialization")
+    report = _build_report(
+        gemini,
+        elevenlabs,
+        new_gemini_calls=new_gemini_calls,
+        new_elevenlabs_calls=new_elevenlabs_calls,
+    )
+    stage_callback("report_secret_scan")
+    payload = _safe_report_bytes(report)
+    stage_callback("checkpoint_finalization")
+    _write_report_bytes(report_path, payload, force=force)
+    return report
+
+
 def _checkpoint_failure_stage(path: Path, fallback: str) -> str:
     if not path.is_file():
         return fallback
@@ -1555,8 +1707,65 @@ def _checkpoint_failure_stage(path: Path, fallback: str) -> str:
     return checkpoint.current_stage or fallback
 
 
+def resume_existing(report_path: Path, *, force: bool) -> int:
+    """Finalize a completed live run without contacting any provider.
+
+    Both checkpoints must already be ``complete``. No Gemini or ElevenLabs
+    request is issued, no B2 object is written and no Supabase record is
+    created; only the persisted safe evidence is validated and reported.
+    """
+    stage = "multimodal_evidence_validation"
+
+    def mark(name: str) -> None:
+        nonlocal stage
+        stage = name
+        print(f"PASS: {name}")
+
+    try:
+        gemini_store = CheckpointStore(
+            DEFAULT_GEMINI_CHECKPOINT, DEFAULT_PRIVATE_ROOT / "gemini"
+        )
+        elevenlabs_store = CheckpointStore(
+            DEFAULT_ELEVENLABS_CHECKPOINT, DEFAULT_PRIVATE_ROOT / "elevenlabs"
+        )
+        if not gemini_store.exists() or not elevenlabs_store.exists():
+            raise LiveCheckpointError("INCOMPLETE_EVIDENCE")
+        gemini_checkpoint = gemini_store.read()
+        elevenlabs_checkpoint = elevenlabs_store.read()
+        if (
+            gemini_checkpoint.operation_state != "complete"
+            or elevenlabs_checkpoint.operation_state != "complete"
+        ):
+            raise LiveCheckpointError("INCOMPLETE_EVIDENCE")
+        report = finalize(
+            _operation_report(gemini_checkpoint),
+            _operation_report(elevenlabs_checkpoint),
+            report_path,
+            force=force,
+            new_gemini_calls=0,
+            new_elevenlabs_calls=0,
+            stage_callback=mark,
+        )
+        print(f"NEW_GEMINI_CALLS={report['new_gemini_calls']}")
+        print(f"NEW_ELEVENLABS_CALLS={report['new_elevenlabs_calls']}")
+        print("PASS: safe_report")
+        return 0
+    except LiveCheckpointError as exc:
+        category = exc.category
+    except Exception:
+        category = "SAFE_UNEXPECTED_FAILURE"
+    print(f"FAIL: {stage} (CATEGORY={category})")
+    return 1
+
+
 def run_live(report_path: Path, *, force: bool) -> int:
     current_stage = "gemini_configuration_validation"
+
+    def mark(name: str) -> None:
+        nonlocal current_stage
+        current_stage = name
+        print(f"PASS: {name}")
+
     try:
         load_dotenv(DEFAULT_ENV_FILE, override=False)
         settings = load_settings()
@@ -1595,27 +1804,20 @@ def run_live(report_path: Path, *, force: bool) -> int:
             run_gemini,
             run_elevenlabs,
         )
+        current_stage = "multimodal_database_secret_scan"
         _database_secret_scan(repository, gemini_store.read(), _secret_values(config))
         _database_secret_scan(repository, elevenlabs_store.read(), _secret_values(config))
-        report: dict[str, object] = {
-            "schema_version": "firemark.multimodal-generate-and-seal-report.v1",
-            "package_versions": {
-                name: importlib.metadata.version(name)
-                for name in ("firemark", "genblaze-core", "boto3", "supabase")
-            },
-            "gemini": gemini,
-            "elevenlabs": elevenlabs,
-            "production_gemini_evidence": True,
-            "production_elevenlabs_evidence": True,
-            "production_multimodal_evidence": True,
-            "production_b2_custody_evidence": True,
-            "production_supabase_evidence": True,
-            "new_gemini_calls": gemini_store.read().new_provider_calls,
-            "new_elevenlabs_calls": elevenlabs_store.read().new_provider_calls,
-        }
-        if report["new_gemini_calls"] != 1 or report["new_elevenlabs_calls"] != 1:
-            raise LiveCheckpointError("VERIFICATION_FAILURE")
-        _write_safe_report(report_path, report, force=force)
+        report = finalize(
+            gemini,
+            elevenlabs,
+            report_path,
+            force=force,
+            new_gemini_calls=gemini_store.read().new_provider_calls,
+            new_elevenlabs_calls=elevenlabs_store.read().new_provider_calls,
+            stage_callback=mark,
+        )
+        print(f"NEW_GEMINI_CALLS={report['new_gemini_calls']}")
+        print(f"NEW_ELEVENLABS_CALLS={report['new_elevenlabs_calls']}")
         print("PASS: safe_report")
         return 0
     except GenerationProviderError as exc:
@@ -1632,12 +1834,18 @@ def run_live(report_path: Path, *, force: bool) -> int:
         category = "TIMEOUT"
     except Exception:
         category = "SAFE_UNEXPECTED_FAILURE"
-    checkpoint_path = (
-        DEFAULT_ELEVENLABS_CHECKPOINT
-        if current_stage.startswith("elevenlabs")
-        else DEFAULT_GEMINI_CHECKPOINT
-    )
-    failure_stage = _checkpoint_failure_stage(checkpoint_path, current_stage)
+    if current_stage in FINALIZATION_STAGES or current_stage.startswith("multimodal_"):
+        # A terminal defect belongs to its own stage. Reusing a per-operation
+        # checkpoint here is what previously reported a completed ElevenLabs run
+        # as a configuration failure.
+        failure_stage = current_stage
+    else:
+        checkpoint_path = (
+            DEFAULT_ELEVENLABS_CHECKPOINT
+            if current_stage.startswith("elevenlabs")
+            else DEFAULT_GEMINI_CHECKPOINT
+        )
+        failure_stage = _checkpoint_failure_stage(checkpoint_path, current_stage)
     print(f"FAIL: {failure_stage} (CATEGORY={category})")
     return 1
 
@@ -1653,15 +1861,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-report", type=Path, default=DEFAULT_REPORT, help="Safe JSON report path."
     )
     parser.add_argument("--force", action="store_true", help="Replace an existing report.")
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help=(
+            "Finalize an already completed run from its persisted checkpoints. "
+            "Issues zero Gemini and zero ElevenLabs generation requests. It needs "
+            "--live only when a stage is still incomplete and remote reads are required."
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.resume_existing and not args.live:
+        print("INFO: resuming from persisted checkpoints; no provider request is issued.")
+        print("INFO: no Gemini, ElevenLabs, B2, or Supabase client was constructed.")
+        return resume_existing(args.output_report, force=args.force)
     if not args.live:
         print("INFO: --live not supplied; zero network calls were made.")
         print("INFO: no Gemini, ElevenLabs, B2, or Supabase client was constructed.")
         return INFORMATIONAL_EXIT_CODE
+    if args.resume_existing:
+        print("NOTICE: resuming incomplete stages; no new provider request is issued.")
     return run_live(args.output_report, force=args.force)
 
 

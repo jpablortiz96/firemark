@@ -211,6 +211,30 @@ generation, and the CLI says so before it runs. A second failure fails closed ag
 Safe checkpoints live under the ignored `.artifacts/` tree; private bytes go in a separate
 `*-private/` subtree and are referenced only by local path.
 
+**Finalization owns its own stages.** After the media operations finish, the multimodal smoke runs
+`multimodal_evidence_validation`, `report_serialization`, `report_secret_scan` and
+`checkpoint_finalization`. Never let a terminal failure inherit a stale per-operation stage variable
+— that is what once reported a fully successful ElevenLabs run as
+`elevenlabs_configuration_validation`. Stage names must stay unique across the Gemini, ElevenLabs
+and finalization tuples.
+
+The report secret scan validates stage rows against the declared stage tuples rather than
+substring-scanning them. Stage labels are FIREMARK vocabulary (`gemini_private_manifest` names a
+step, it never carries a manifest), so scanning them as provider data produces false positives.
+Everything outside those validated rows is still marker-scanned.
+
+`--resume-existing` finalizes an already complete run from persisted checkpoints with zero provider
+calls and no `--live`. It reports `new_*_calls` as calls made by *this process* (0) and
+`recorded_*_calls` as the calls the original operation made (1).
+
+### B2 environment variables
+
+The canonical names are `B2_ENDPOINT` and `B2_REGION` — **not** `B2_ENDPOINT_URL` or
+`B2_REGION_NAME`, which FIREMARK does not read. Application keys accept
+`B2_ASSETS_APPLICATION_KEY`/`B2_ASSETS_APP_KEY` and `B2_VAULT_APPLICATION_KEY`/`B2_VAULT_APP_KEY`;
+configuring conflicting aliases is rejected. Never add duplicate variables to satisfy an incorrect
+external checklist.
+
 ## Quality gates
 
 Run from `D:\firemark` in PowerShell:
