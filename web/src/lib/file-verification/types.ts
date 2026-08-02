@@ -50,6 +50,37 @@ export type AudioLayerKey =
   | "local_file_hash"
   | "cryptographic_verification";
 
+/**
+ * Deterministic precedence for audio failures. The result headline is always
+ * derived from the FIRST layer in this order that actually failed, so a later
+ * unchecked layer can never rename an earlier real failure.
+ */
+export const AUDIO_LAYER_ORDER: readonly AudioLayerKey[] = [
+  "local_processing",
+  "mp3_format",
+  "public_certificate",
+  "media_contract",
+  "byte_preserving_seal",
+  "local_file_hash",
+  "cryptographic_verification",
+];
+
+/**
+ * The exact audio failure, decided where the cause is known. It is never
+ * inferred from a shared file-state enum, which is what previously let a
+ * missing certificate ID render PNG copy.
+ */
+export type AudioFailureReason =
+  | "certificate_id_required"
+  | "invalid_mp3"
+  | "certificate_not_found"
+  | "certificate_revoked"
+  | "media_contract_mismatch"
+  | "seal_contract_inconsistent"
+  | "local_hash_mismatch"
+  | "verification_rejected"
+  | "verification_unavailable";
+
 export interface VerificationLayer {
   key: VerificationLayerKey | AudioLayerKey;
   label: string;
@@ -82,6 +113,8 @@ export interface LensResult {
   verification?: VerificationResult;
   /** Public certificate projection, when the audio flow retrieved one. */
   certificate?: PublicCertificate;
+  /** Set only by the audio flow; drives the audio result headline. */
+  audioFailure?: AudioFailureReason;
 }
 
 export type ProgressPhase = "reading" | "capsule" | "hashing" | "verifying" | "complete";

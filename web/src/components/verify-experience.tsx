@@ -63,12 +63,14 @@ export function VerifyExperience({
         aria-labelledby={`verify-tab-${mode}`}
         tabIndex={-1}
       >
+        {/* The key forces a fresh panel per mode, so no result, error or
+            in-flight request can survive a media switch. */}
         {mode === "image" ? (
-          <LensVerifier />
+          <LensVerifier key="image" />
         ) : mode === "audio" ? (
-          <AudioVerifier initialCertId={initialCertId} />
+          <AudioVerifier key="audio" initialCertId={initialCertId} />
         ) : (
-          <VerifyForm initialCertId={initialCertId} initialSha256={initialSha256} />
+          <VerifyForm key="certificate" initialCertId={initialCertId} initialSha256={initialSha256} />
         )}
       </div>
     </div>

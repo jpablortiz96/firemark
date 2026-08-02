@@ -17,6 +17,8 @@ export function AudioVerifier({ initialCertId = "" }: { initialCertId?: string }
   const inputRef = useRef<HTMLInputElement>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const previewRef = useRef<string | null>(null);
+  // Monotonic request generation: only the newest run may write a result.
+  const generationRef = useRef(0);
   const [certId, setCertId] = useState(initialCertId);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -43,6 +45,7 @@ export function AudioVerifier({ initialCertId = "" }: { initialCertId?: string }
 
   /** Any change invalidates a prior decision. Never keep a stale success. */
   function select(next: File | null, rejection?: string) {
+    generationRef.current += 1;
     controllerRef.current?.abort();
     controllerRef.current = null;
     setResult(null);
@@ -74,6 +77,9 @@ export function AudioVerifier({ initialCertId = "" }: { initialCertId?: string }
     controllerRef.current?.abort();
     const controller = new AbortController();
     controllerRef.current = controller;
+    generationRef.current += 1;
+    const generation = generationRef.current;
+    const current = () => generationRef.current === generation;
     setProcessing(true);
     setResult(null);
     setNotice(null);
@@ -83,14 +89,14 @@ export function AudioVerifier({ initialCertId = "" }: { initialCertId?: string }
         onProgress: setProgress,
       });
       // Discard a result the user has already moved past.
-      if (controllerRef.current === controller) setResult(outcome);
+      if (current()) setResult(outcome);
     } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) {
+      if (current() && !(error instanceof DOMException && error.name === "AbortError")) {
         setResult(null);
         setNotice("Verification is temporarily unavailable. Nothing was uploaded.");
       }
     } finally {
-      if (controllerRef.current === controller) {
+      if (current()) {
         setProcessing(false);
         setProgress(null);
       }
@@ -123,6 +129,10 @@ export function AudioVerifier({ initialCertId = "" }: { initialCertId?: string }
           id="audio-cert-id"
           value={certId}
           onChange={(event) => {
+            // A different certificate ID invalidates any prior decision.
+            generationRef.current += 1;
+            controllerRef.current?.abort();
+            controllerRef.current = null;
             setCertId(event.target.value);
             setResult(null);
             setNotice(null);

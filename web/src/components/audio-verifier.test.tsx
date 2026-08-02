@@ -96,7 +96,7 @@ describe("Lens media selection", () => {
     await user.upload(screen.getByLabelText("Choose MP3 file"), mp3File());
     await user.click(screen.getByRole("button", { name: /Verify this MP3 locally/ }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /authentic and unchanged/i })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: "This MP3 is verified" })).toBeInTheDocument(),
     );
 
     await user.click(screen.getByRole("tab", { name: "Image · PNG" }));
@@ -171,7 +171,7 @@ describe("audio verification state isolation", () => {
     await user.upload(input, mp3File());
     await user.click(screen.getByRole("button", { name: /Verify this MP3 locally/ }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /authentic and unchanged/i })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: "This MP3 is verified" })).toBeInTheDocument(),
     );
 
     await user.upload(input, mp3File("other.mp3"));
@@ -187,7 +187,7 @@ describe("audio verification state isolation", () => {
     await user.upload(screen.getByLabelText("Choose MP3 file"), mp3File());
     await user.click(screen.getByRole("button", { name: /Verify this MP3 locally/ }));
     await waitFor(() =>
-      expect(screen.getByRole("heading", { name: /authentic and unchanged/i })).toBeInTheDocument(),
+      expect(screen.getByRole("heading", { name: "This MP3 is verified" })).toBeInTheDocument(),
     );
 
     await user.type(screen.getByLabelText(/Certificate ID/), "x");

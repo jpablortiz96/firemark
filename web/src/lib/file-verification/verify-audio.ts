@@ -9,6 +9,7 @@ import type {
   VerificationProgress,
 } from "@/lib/file-verification/types";
 import {
+  AUDIO_LAYER_ORDER,
   AUDIO_MIME_ALIASES,
   CANONICAL_AUDIO_MIME_TYPE,
   MAX_AUDIO_FILE_BYTES,
@@ -28,7 +29,15 @@ const AUDIO_LAYER_LABELS: Record<AudioLayerKey, string> = {
   cryptographic_verification: "Cryptographic verification",
 };
 
-const AUDIO_LAYER_ORDER = Object.keys(AUDIO_LAYER_LABELS) as AudioLayerKey[];
+/** The declared precedence must cover exactly the declared audio layers. */
+export function firstFailedAudioLayer(
+  layers: readonly VerificationLayer[],
+): AudioLayerKey | null {
+  for (const key of AUDIO_LAYER_ORDER) {
+    if (layers.find((layer) => layer.key === key)?.status === "FAIL") return key;
+  }
+  return null;
+}
 
 type VerifyFunction = (
   request: VerificationRequest,
@@ -113,9 +122,11 @@ export async function verifyLocalAudio(
   const identity = base(file, normalizedCertId);
 
   if (!isCertificateId(normalizedCertId)) {
+    // The MP3 itself was never rejected: byte validation has not run yet.
     return {
       ...identity,
       state: "invalid_file",
+      audioFailure: "certificate_id_required",
       layers: audioLayers({
         local_processing: { status: "PASS", detail: "file bytes remained on this device" },
         mp3_format: { status: "NOT CHECKED" },
@@ -127,6 +138,7 @@ export async function verifyLocalAudio(
   const rejectFile = (detail: string): LensResult => ({
     ...identity,
     state: "invalid_file",
+    audioFailure: "invalid_mp3",
     layers: audioLayers({
       local_processing: { status: "PASS", detail: "file bytes remained on this device" },
       mp3_format: { status: "FAIL", detail },
@@ -163,6 +175,12 @@ export async function verifyLocalAudio(
       return {
         ...identity,
         state: found.state === "revoked" ? "revoked" : found.state === "error" ? "unavailable" : "not_found",
+        audioFailure:
+          found.state === "revoked"
+            ? "certificate_revoked"
+            : found.state === "error"
+              ? "verification_unavailable"
+              : "certificate_not_found",
         sealedSha256: localSha256,
         layers: audioLayers({
           ...passedLocally,
@@ -192,6 +210,7 @@ export async function verifyLocalAudio(
       return {
         ...identity,
         state: "invalid_file",
+        audioFailure: "media_contract_mismatch",
         sealedSha256: localSha256,
         certificate,
         layers: audioLayers({
@@ -213,6 +232,7 @@ export async function verifyLocalAudio(
       return {
         ...identity,
         state: "unverified",
+        audioFailure: "seal_contract_inconsistent",
         sealedSha256: localSha256,
         certificate,
         layers: audioLayers({
@@ -225,6 +245,7 @@ export async function verifyLocalAudio(
       return {
         ...identity,
         state: "unverified",
+        audioFailure: "seal_contract_inconsistent",
         sealedSha256: localSha256,
         certificate,
         layers: audioLayers({
@@ -249,6 +270,7 @@ export async function verifyLocalAudio(
       return {
         ...identity,
         state: "tampered",
+        audioFailure: "local_hash_mismatch",
         sealedSha256: localSha256,
         certificate,
         layers: audioLayers({
@@ -280,6 +302,7 @@ export async function verifyLocalAudio(
     return {
       ...identity,
       state: resultState(verification),
+      audioFailure: verification.verified ? undefined : "verification_rejected",
       sealedSha256: localSha256,
       certificate,
       verification,
@@ -300,6 +323,7 @@ export async function verifyLocalAudio(
     return {
       ...identity,
       state: "unavailable",
+      audioFailure: "verification_unavailable",
       layers: audioLayers({
         local_processing: { status: "PASS", detail: "file bytes remained on this device" },
         mp3_format: { status: "PASS", detail: "valid MP3 structure detected" },
